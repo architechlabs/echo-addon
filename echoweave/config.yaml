@@ -1,6 +1,6 @@
 name: "Echo Bridge"
 description: >-
-  Alexa ↔ Music Assistant bridge.  Automatically discovers Music Assistant,
+  Alexa to Music Assistant bridge. Automatically discovers Music Assistant,
   installs the Echoweave Proxy integration into Home Assistant, and creates
   media-player entities that Music Assistant can target for playback on Alexa.
 version: "2.0.0"
@@ -27,12 +27,6 @@ map:
 
 hassio_api: true
 homeassistant_api: true
-auth_api: false
-
-discovery:
-  - service: echoweave_proxy
-    config:
-      addon: echo_bridge
 
 options:
   public_url: "https://echo-api.gethomeassistant.com"
