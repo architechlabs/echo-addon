@@ -229,7 +229,7 @@ def _render_form(
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 
-@router.get("/authorize", summary="Account linking — show setup form")
+@router.get("/authorize", summary="Account linking — show setup form", response_model=None)
 async def authorize_get(
     response_type: str = "code",
     client_id: str = "",
@@ -247,7 +247,7 @@ async def authorize_get(
     )
 
 
-@router.post("/authorize", summary="Account linking — handle form submission")
+@router.post("/authorize", summary="Account linking — handle form submission", response_model=None)
 async def authorize_post(
     client_id: str = Form(""),
     redirect_uri: str = Form(""),
