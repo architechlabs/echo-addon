@@ -4,11 +4,11 @@ Flow
 ----
 1.  User enables the skill in the Alexa app.
 2.  Alexa redirects to  GET /auth/authorize?response_type=code&client_id=...&redirect_uri=...&state=...
-3.  We render an HTML form asking for the user's Music Assistant URL and token.
+3.  We fetch the player list from the locally-configured MA instance and render
+    a form that just asks the user to pick a player.
 4.  User submits the form (POST /auth/authorize).
-    a. We test connectivity to their MA instance.
-    b. On success we generate a short-lived auth code, persist the config,
-       and redirect back to Alexa with  ?code=...&state=...
+    We use the addon's own MA URL + token (already configured), store the
+    chosen player_id, and redirect back to Alexa with ?code=...&state=...
 5.  Alexa exchanges the code:  POST /auth/token  (form-encoded, or HTTP Basic auth).
     We return a permanent access_token (UUID).
 6.  Every subsequent Alexa request carries  context.System.user.accessToken = <UUID>.
@@ -41,7 +41,7 @@ _FORM_TEMPLATE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Echo Bridge — Link Your Music Assistant</title>
+  <title>Echo Bridge — Link Your Account</title>
   <style>
     *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
     body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
@@ -60,31 +60,26 @@ _FORM_TEMPLATE = """<!DOCTYPE html>
     .field{{margin-bottom:1.1rem}}
     .field label{{display:block;font-size:.7rem;font-weight:700;color:#94a3b8;
                   text-transform:uppercase;letter-spacing:.06em;margin-bottom:.35rem}}
-    .field input{{width:100%;padding:.625rem .875rem;background:#0f172a;
+    .field select,.field input{{width:100%;padding:.625rem .875rem;background:#0f172a;
                   border:1.5px solid #334155;border-radius:8px;color:#f1f5f9;
-                  font-size:.875rem;outline:none;transition:border-color .15s}}
-    .field input:focus{{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.15)}}
-    .field input::placeholder{{color:#475569}}
+                  font-size:.875rem;outline:none;transition:border-color .15s;
+                  appearance:none;-webkit-appearance:none}}
+    .field select{{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+                   background-repeat:no-repeat;background-position:right .875rem center;padding-right:2.5rem}}
+    .field select:focus,.field input:focus{{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.15)}}
     .hint{{font-size:.72rem;color:#64748b;margin-top:.3rem;line-height:1.5}}
-    .hint a{{color:#60a5fa;text-decoration:none}}
     .alert{{background:#450a0a;border:1px solid #7f1d1d;border-radius:8px;
             padding:.75rem 1rem;font-size:.85rem;color:#fca5a5;margin-bottom:1.25rem;
             display:flex;gap:.5rem;align-items:flex-start}}
-    .alert svg{{flex-shrink:0;margin-top:.1rem}}
+    .info-box{{background:#0c1a2e;border:1px solid #1e3a5f;border-radius:8px;
+               padding:.75rem 1rem;font-size:.8rem;color:#7dd3fc;margin-bottom:1.25rem}}
+    .info-box strong{{color:#93c5fd}}
     .btn{{width:100%;padding:.8rem;background:#2563eb;color:#fff;font-size:.9375rem;
           font-weight:600;border:none;border-radius:8px;cursor:pointer;
           margin-top:.5rem;transition:background .15s;display:flex;
           align-items:center;justify-content:center;gap:.5rem}}
     .btn:hover{{background:#1d4ed8}}
     .btn:active{{background:#1e40af}}
-    .divider{{border:none;border-top:1px solid #1e3a5f;margin:1.5rem 0}}
-    .steps{{display:flex;flex-direction:column;gap:.7rem}}
-    .step{{display:flex;gap:.75rem;align-items:flex-start}}
-    .step-n{{width:1.375rem;height:1.375rem;border-radius:50%;background:#172554;
-              color:#93c5fd;font-size:.7rem;font-weight:800;display:flex;
-              align-items:center;justify-content:center;flex-shrink:0;margin-top:.15rem}}
-    .step-t{{font-size:.78rem;color:#94a3b8;line-height:1.55}}
-    .step-t strong{{color:#cbd5e1;font-weight:600}}
   </style>
 </head>
 <body>
@@ -105,8 +100,12 @@ _FORM_TEMPLATE = """<!DOCTYPE html>
 
   {error_block}
 
-  <h2>Link your Music Assistant</h2>
-  <p class="sub">Enter your MA server details to enable voice control with Alexa.</p>
+  <div class="info-box">
+    Connected to Music Assistant at <strong>{ma_url}</strong>
+  </div>
+
+  <h2>Choose your default player</h2>
+  <p class="sub">Select which Music Assistant player Alexa should control by default.</p>
 
   <form method="POST" action="/auth/authorize">
     <input type="hidden" name="client_id"      value="{client_id}">
@@ -115,36 +114,13 @@ _FORM_TEMPLATE = """<!DOCTYPE html>
     <input type="hidden" name="response_type"  value="{response_type}">
 
     <div class="field">
-      <label>Music Assistant URL</label>
-      <input type="url" name="ma_url" required
-             placeholder="http://192.168.1.42:8095" value="{ma_url}">
-      <p class="hint">
-        The URL of your MA server — visible in
-        <strong>MA &rarr; Settings &rarr; Info</strong>.
-        Can be a local IP, <code>homeassistant.local</code>, or a Nabu Casa URL.
-      </p>
-    </div>
-
-    <div class="field">
-      <label>Long-lived Access Token</label>
-      <input type="password" name="ma_token" required
-             placeholder="Paste your token here">
-      <p class="hint">
-        In Music Assistant go to
-        <strong>Settings &rarr; User &rarr; Long-lived access tokens</strong>
-        and click <strong>+&nbsp;Create token</strong>.
-      </p>
-    </div>
-
-    <div class="field">
-      <label>Default Player ID
+      <label>Default Player
         <span style="text-transform:none;font-weight:400;color:#475569">&nbsp;— optional</span>
       </label>
-      <input type="text" name="player_id"
-             placeholder="Leave blank to auto-select" value="{player_id}">
+      {player_field}
       <p class="hint">
-        Only needed if you have multiple players and want to pin one.
-        You can always re-link to change this.
+        Leave blank (or select Auto) to let Echo Bridge pick the first available player.
+        You can re-link any time to change this.
       </p>
     </div>
 
@@ -158,35 +134,6 @@ _FORM_TEMPLATE = """<!DOCTYPE html>
       Link Account
     </button>
   </form>
-
-  <hr class="divider">
-
-  <div class="steps">
-    <div class="step">
-      <div class="step-n">1</div>
-      <div class="step-t">
-        <strong>Find your MA URL</strong><br>
-        Open Music Assistant &rarr; Settings &rarr; Info.
-        The URL shown there is what you paste above.
-      </div>
-    </div>
-    <div class="step">
-      <div class="step-n">2</div>
-      <div class="step-t">
-        <strong>Create a token</strong><br>
-        Settings &rarr; User &rarr; Long-lived access tokens &rarr; click +&nbsp;Create.
-        Copy the token and paste it above.
-      </div>
-    </div>
-    <div class="step">
-      <div class="step-n">3</div>
-      <div class="step-t">
-        <strong>Link and go</strong><br>
-        Click <em>Link Account</em>. Then say
-        <strong>"Alexa, open music player"</strong> and start playing.
-      </div>
-    </div>
-  </div>
 </div>
 </body>
 </html>"""
@@ -199,7 +146,8 @@ def _render_form(
     response_type: str = "code",
     error: str = "",
     ma_url: str = "",
-    player_id: str = "",
+    players: Optional[list[dict]] = None,
+    selected_player_id: str = "",
 ) -> str:
     if error:
         error_block = (
@@ -215,18 +163,50 @@ def _render_form(
     else:
         error_block = ""
 
+    if players:
+        options = '<option value="">— Auto-select —</option>\n'
+        for p in players:
+            pid = p.get("player_id") or p.get("id") or ""
+            name = p.get("display_name") or p.get("name") or pid
+            sel = ' selected' if pid == selected_player_id else ''
+            options += f'<option value="{pid}"{sel}>{name}</option>\n'
+        player_field = f'<select name="player_id">{options}</select>'
+    else:
+        player_field = (
+            '<input type="text" name="player_id" '
+            'placeholder="Leave blank to auto-select" '
+            f'value="{selected_player_id}">'
+        )
+
     return _FORM_TEMPLATE.format(
         client_id=client_id,
         redirect_uri=redirect_uri,
         state=state,
         response_type=response_type,
         error_block=error_block,
-        ma_url=ma_url,
-        player_id=player_id,
+        ma_url=ma_url or "(not configured)",
+        player_field=player_field,
     )
 
-
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+
+async def _fetch_players(ma_url: str, ma_token: str) -> list[dict]:
+    """Fetch player list from local MA for the player picker dropdown."""
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.post(
+                f"{ma_url}/api",
+                json={"message_id": "link-players", "command": "players/all", "args": {}},
+                headers={"Authorization": f"Bearer {ma_token}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            players = data if isinstance(data, list) else data.get("result", [])
+            return players if isinstance(players, list) else []
+    except Exception as exc:
+        logger.warning("Account linking: could not fetch players: %s", exc)
+        return []
 
 
 @router.get("/authorize", summary="Account linking — show setup form", response_model=None)
@@ -237,12 +217,17 @@ async def authorize_get(
     state: str = "",
     scope: str = "",
 ) -> HTMLResponse:
+    from app.main import get_settings
+    settings = get_settings()
+    players = await _fetch_players(settings.local_ma_url, settings.local_ma_token)
     return HTMLResponse(
         _render_form(
             client_id=client_id,
             redirect_uri=redirect_uri,
             state=state,
             response_type=response_type,
+            ma_url=settings.local_ma_url,
+            players=players,
         )
     )
 
@@ -253,90 +238,30 @@ async def authorize_post(
     redirect_uri: str = Form(""),
     state: str = Form(""),
     response_type: str = Form("code"),
-    ma_url: str = Form(...),
-    ma_token: str = Form(...),
     player_id: str = Form(""),
 ) -> HTMLResponse | RedirectResponse:
     from app.main import get_settings
-
     settings = get_settings()
 
-    # ── Normalise MA URL ──────────────────────────────────────────────────
-    ma_url = ma_url.strip().rstrip("/")
-    if not ma_url.startswith(("http://", "https://")):
+    ma_url = settings.local_ma_url.strip().rstrip("/")
+    ma_token = settings.local_ma_token.strip()
+
+    if not ma_url:
+        players = []
         return HTMLResponse(
             _render_form(
                 client_id=client_id,
                 redirect_uri=redirect_uri,
                 state=state,
                 response_type=response_type,
-                error="Music Assistant URL must start with http:// or https://",
+                error="Music Assistant is not configured in the addon settings.",
                 ma_url=ma_url,
-                player_id=player_id,
+                players=players,
+                selected_player_id=player_id,
             )
         )
 
-    # ── Test MA connectivity (fast 5 s check) ─────────────────────────────
-    logger.info("Account linking: testing MA connectivity at %s", ma_url)
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.post(
-                f"{ma_url}/api",
-                json={"message_id": "link-test", "command": "server/info", "args": {}},
-                headers={"Authorization": f"Bearer {ma_token}"},
-            )
-            if resp.status_code == 401:
-                raise ValueError("Token rejected by Music Assistant (401 Unauthorized)")
-            if resp.status_code == 403:
-                raise ValueError("Token has insufficient permissions (403 Forbidden)")
-            resp.raise_for_status()
-            info = resp.json().get("result", {})
-            version = info.get("server_version") or info.get("version") or "?"
-            logger.info("Account linking: MA reachable version=%s", version)
-    except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        logger.warning("Account linking: cannot reach MA at %s: %s", ma_url, exc)
-        return HTMLResponse(
-            _render_form(
-                client_id=client_id,
-                redirect_uri=redirect_uri,
-                state=state,
-                response_type=response_type,
-                error=(
-                    f"Cannot reach Music Assistant at <strong>{ma_url}</strong>. "
-                    "Check the URL and make sure the server is running. "
-                    "If using a local IP, ensure this service is on the same network."
-                ),
-                ma_url=ma_url,
-                player_id=player_id,
-            )
-        )
-    except ValueError as exc:
-        return HTMLResponse(
-            _render_form(
-                client_id=client_id,
-                redirect_uri=redirect_uri,
-                state=state,
-                response_type=response_type,
-                error=str(exc),
-                ma_url=ma_url,
-                player_id=player_id,
-            )
-        )
-    except Exception as exc:
-        logger.warning("Account linking: MA test failed: %s", exc)
-        return HTMLResponse(
-            _render_form(
-                client_id=client_id,
-                redirect_uri=redirect_uri,
-                state=state,
-                response_type=response_type,
-                error=f"Could not connect to Music Assistant: {exc}",
-                ma_url=ma_url,
-                player_id=player_id,
-            )
-        )
-
-    # ── Store auth code and redirect to Alexa ────────────────────────────
+    # ── Store auth code and redirect to Alexa ─────────────────────────────
     code = await storage.create_auth_code(
         path=settings.db_path,
         ma_url=ma_url,
@@ -345,7 +270,7 @@ async def authorize_post(
         redirect_uri=redirect_uri,
         state=state,
     )
-    logger.info("Account linking: auth code issued, redirecting back to Alexa")
+    logger.info("Account linking: auth code issued player_id=%s", player_id.strip() or "(auto)")
 
     sep = "&" if "?" in redirect_uri else "?"
     destination = f"{redirect_uri}{sep}code={code}&state={state}"
