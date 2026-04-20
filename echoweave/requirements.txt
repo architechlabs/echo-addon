@@ -6,3 +6,4 @@ pydantic-settings>=2.2
 cryptography>=42
 aiosqlite>=0.20
 websockets>=12
+python-multipart>=0.0.9
