@@ -53,8 +53,8 @@ schema:
   oauth_client_id: str
   oauth_client_secret: str
   alexa_skill_id: str
-  alexa_validation: "enforce|log|off"
-  log_level: "DEBUG|INFO|WARNING|ERROR"
+  alexa_validation: "list(enforce|log|off)"
+  log_level: "list(DEBUG|INFO|WARNING|ERROR)"
   backend_ws_url: str?
   backend_ws_token: str?
   backend_instance_id: str?
