@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     proxy_status_poll_interval: int = 3
     proxy_player_filter: str = ""
 
+    # ── Worker registration ──────────────────────────────────────────────────
+    worker_url: str = "https://echo-api.gethomeassistant.com"
+    worker_secret: str = ""
+
     # ── Runtime ────────────────────────────────────────────────────────────
     log_level: str = "INFO"
     port: int = 8000

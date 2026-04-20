@@ -78,11 +78,65 @@ async def lifespan(app: FastAPI):
             "Backend websocket URL is set but local proxy is not fully configured; bridge will stay disabled"
         )
 
+    # ── Push home config to worker so account linking needs no manual input ──
+    if _settings.worker_secret and _settings.local_ma_url and _settings.local_ma_token:
+        import asyncio
+        asyncio.create_task(_register_with_worker(_settings))
+    else:
+        logger.info(
+            "Worker registration skipped — set worker_secret (and ensure local_ma_url/local_ma_token are set) to enable auto player-picker on account linking"
+        )
+
     yield
 
     await app.state.backend_ws_bridge.stop()
 
     logger.info("Echo Bridge shutting down")
+
+
+async def _register_with_worker(settings) -> None:
+    """Push MA config + player list to the Cloudflare worker.
+
+    Called once on startup (fire-and-forget). Failures are logged but not fatal.
+    This lets the worker's account-linking form show a player dropdown without
+    the user ever having to type a URL or token.
+    """
+    import httpx
+    from app.ma.client import MusicAssistantClient
+
+    try:
+        client = MusicAssistantClient(settings.local_ma_url, settings.local_ma_token)
+        raw_players = await client.get_players()
+        players = [
+            {
+                "player_id": p.get("player_id", ""),
+                "name": p.get("display_name") or p.get("name") or p.get("player_id", ""),
+            }
+            for p in raw_players
+            if p.get("player_id")
+        ]
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            resp = await http.post(
+                f"{settings.worker_url.rstrip('/')}/api/home/register",
+                json={
+                    "ma_url": settings.local_ma_url,
+                    "ma_token": settings.local_ma_token,
+                    "players": players,
+                },
+                headers={"X-Addon-Secret": settings.worker_secret},
+            )
+        if resp.status_code == 200:
+            logger.info(
+                "Registered with worker at %s — %d players pushed",
+                settings.worker_url,
+                len(players),
+            )
+        else:
+            logger.warning(
+                "Worker registration failed: HTTP %s — %s", resp.status_code, resp.text[:200]
+            )
+    except Exception as exc:
+        logger.warning("Worker registration failed: %s", exc)
 
 
 def create_app() -> FastAPI:
