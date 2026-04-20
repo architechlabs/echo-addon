@@ -156,7 +156,7 @@ class MusicAssistantClient:
                 resp = await client.post(self._api_url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
-                result = data.get("result", data)
+                result = data.get("result", data) if isinstance(data, dict) else data
                 logger.info("MA response: %s  status=%d", command, resp.status_code)
                 return result
             except httpx.ConnectError as exc:
