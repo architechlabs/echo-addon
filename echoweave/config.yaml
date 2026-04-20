@@ -1,12 +1,14 @@
-name: "Echo Bridge"
+name: Echo Bridge
 description: >-
   Alexa to Music Assistant bridge. Automatically discovers Music Assistant,
   installs the Echoweave Proxy integration into Home Assistant, and creates
   media-player entities that Music Assistant can target for playback on Alexa.
 version: "2.0.0"
-slug: "echo_bridge"
+slug: echo_bridge
+url: https://github.com/architechlabs/echo-addon
 init: false
 startup: services
+boot: auto
 stage: stable
 
 arch:
@@ -19,30 +21,31 @@ arch:
 ports:
   8000/tcp: 8000
 ports_description:
-  8000/tcp: "Alexa skill endpoint + proxy API"
+  8000/tcp: Alexa skill endpoint and proxy API
 
 map:
   - data:rw
-  - homeassistant_config:rw
+  - config:rw
 
 hassio_api: true
 homeassistant_api: true
+auth_api: false
 
 options:
   public_url: "https://echo-api.gethomeassistant.com"
-  oauth_client_id: "echo-bridge"
+  oauth_client_id: echo-bridge
   oauth_client_secret: ""
   alexa_skill_id: "amzn1.ask.skill.66fa2985-269c-44af-8a30-7819294ddd65"
-  alexa_validation: "enforce"
-  log_level: "INFO"
+  alexa_validation: enforce
+  log_level: INFO
   backend_ws_url: ""
   backend_ws_token: ""
-  backend_instance_id: "echoweave-local"
+  backend_instance_id: echoweave-local
   auto_discover_ma: true
   auto_setup_integration: true
   local_ma_url: ""
   local_ma_token: ""
-  proxy_player_prefix: "addon"
+  proxy_player_prefix: addon
   proxy_player_filter: ""
 
 schema:

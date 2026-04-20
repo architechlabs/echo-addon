@@ -90,7 +90,7 @@ if [ "${AUTO_DISCOVER_MA}" = "true" ] && [ -z "${ECHO_LOCAL_MA_URL}" ]; then
 fi
 
 # ── Auto-install HA integration ────────────────────────────────────────────
-HA_CONFIG="/homeassistant"
+HA_CONFIG="/config"
 INTEGRATION_SRC="/app/custom_components/echoweave_proxy"
 INTEGRATION_DST="${HA_CONFIG}/custom_components/echoweave_proxy"
 
