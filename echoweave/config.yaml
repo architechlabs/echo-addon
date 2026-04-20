@@ -3,7 +3,7 @@ description: >-
   Alexa to Music Assistant bridge. Automatically discovers Music Assistant,
   installs the Echoweave Proxy integration into Home Assistant, and creates
   media-player entities that Music Assistant can target for playback on Alexa.
-version: "2.0.3"
+version: "2.0.4"
 slug: echo_bridge
 url: https://github.com/architechlabs/echo-addon
 init: false

@@ -13,7 +13,7 @@ from typing import Any
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from app.ma.client import MusicAssistantClient
+from app.ma.client import MusicAssistantAuthError, MusicAssistantClient
 from app.proxy.models import ProxyCommandRequest, ProxyPlayerSnapshot, ProxySnapshot
 from app.settings import Settings
 
@@ -133,6 +133,12 @@ class LocalProxyService:
                 *(self._build_player_snapshot(ma, player) for player in players)
             )
             return sorted(snapshots, key=lambda item: item.name.lower())
+        except MusicAssistantAuthError:
+            logger.error(
+                "MA token rejected (401). Set 'local_ma_token' in addon config with "
+                "a HA long-lived access token (HA Profile → Long-lived access tokens)."
+            )
+            return []
         finally:
             await ma.close()
 

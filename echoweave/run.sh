@@ -80,12 +80,10 @@ if [ "${AUTO_DISCOVER_MA}" = "true" ] && [ -z "${ECHO_LOCAL_MA_URL}" ]; then
     bashio::log.warning "Music Assistant addon not found or not running. Set local_ma_url manually if MA runs externally."
   fi
 
-  # Get a HA long-lived token for MA API access if we don't have one
+  # Warn if no MA token is set — MA requires a HA long-lived access token
   if [ -n "${ECHO_LOCAL_MA_URL}" ] && [ -z "${ECHO_LOCAL_MA_TOKEN}" ]; then
-    # Use SUPERVISOR_TOKEN to access MA through HA — MA accepts HA auth tokens
-    ECHO_LOCAL_MA_TOKEN="${SUPERVISOR_TOKEN}"
-    export ECHO_LOCAL_MA_TOKEN
-    bashio::log.info "Using Supervisor token for Music Assistant API access"
+    bashio::log.warning "No local_ma_token set. MA API calls will be unauthenticated."
+    bashio::log.warning "If MA returns 401, go to your HA profile, create a long-lived access token, and set it as local_ma_token in addon config."
   fi
 fi
 

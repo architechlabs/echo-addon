@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
+from app.ma.client import MusicAssistantAuthError
 from app.proxy.models import ProxyCommandRequest
 from app.proxy.service import BackendWebSocketBridge, LocalProxyService, websocket_status_session
 
@@ -43,6 +44,11 @@ async def proxy_players(request: Request) -> dict[str, Any]:
     proxy = _proxy_service(request)
     try:
         snapshot = await proxy.get_snapshot()
+    except MusicAssistantAuthError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Music Assistant authentication failed. Set local_ma_token in addon config.",
+        ) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return snapshot.model_dump()
