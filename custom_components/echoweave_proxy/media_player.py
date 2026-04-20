@@ -1,0 +1,249 @@
+"""Media player platform for Echoweave proxy players."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from homeassistant.components.media_player import MediaPlayerEntity, MediaType
+from homeassistant.components.media_player.const import MediaPlayerEntityFeature, MediaPlayerState
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import (
+    ATTR_ACTIVE_QUEUE_ID,
+    ATTR_ADDON_PLAYER_ID,
+    ATTR_MA_PLAYER_ID,
+    ATTR_QUEUE_STATE,
+    ATTR_SOURCE,
+    DOMAIN,
+)
+from .coordinator import EchoweaveProxyCoordinator
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    coordinator: EchoweaveProxyCoordinator = hass.data[DOMAIN][entry.entry_id]
+    known: set[str] = set()
+
+    def _build_entities() -> list[EchoweaveProxyPlayerEntity]:
+        new_entities: list[EchoweaveProxyPlayerEntity] = []
+        for player in coordinator.player_payloads():
+            addon_player_id = str(player.get("addon_player_id") or "")
+            if not addon_player_id or addon_player_id in known:
+                continue
+            known.add(addon_player_id)
+            new_entities.append(EchoweaveProxyPlayerEntity(coordinator, entry, addon_player_id))
+        return new_entities
+
+    entities = _build_entities()
+    if entities:
+        async_add_entities(entities)
+
+    def _handle_coordinator_update() -> None:
+        entities = _build_entities()
+        if entities:
+            async_add_entities(entities)
+
+    entry.async_on_unload(coordinator.async_add_listener(_handle_coordinator_update))
+
+
+_STATE_MAP = {
+    "playing": MediaPlayerState.PLAYING,
+    "paused": MediaPlayerState.PAUSED,
+    "idle": MediaPlayerState.IDLE,
+    "off": MediaPlayerState.OFF,
+    "standby": MediaPlayerState.STANDBY,
+    "buffering": MediaPlayerState.BUFFERING,
+}
+
+
+class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], MediaPlayerEntity):
+    _attr_has_entity_name = True
+    _attr_supported_features = (
+        MediaPlayerEntityFeature.PLAY
+        | MediaPlayerEntityFeature.PAUSE
+        | MediaPlayerEntityFeature.STOP
+        | MediaPlayerEntityFeature.NEXT_TRACK
+        | MediaPlayerEntityFeature.PREVIOUS_TRACK
+        | MediaPlayerEntityFeature.VOLUME_SET
+        | MediaPlayerEntityFeature.PLAY_MEDIA
+    )
+
+    def __init__(
+        self,
+        coordinator: EchoweaveProxyCoordinator,
+        entry: ConfigEntry,
+        addon_player_id: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._addon_player_id = addon_player_id
+        self._attr_unique_id = f"echoweave_{addon_player_id.replace(':', '_')}"
+
+    @property
+    def _player(self) -> dict[str, Any]:
+        for player in self.coordinator.player_payloads():
+            if str(player.get("addon_player_id") or "") == self._addon_player_id:
+                return player
+        return {}
+
+    @property
+    def available(self) -> bool:
+        player = self._player
+        if not player:
+            return False
+        return bool(player.get("available", False))
+
+    @property
+    def name(self) -> str | None:
+        player = self._player
+        return str(player.get("name") or self._addon_player_id)
+
+    @property
+    def state(self) -> MediaPlayerState | None:
+        state = str(self._player.get("state") or "").lower()
+        return _STATE_MAP.get(state, MediaPlayerState.IDLE if self.available else None)
+
+    @property
+    def volume_level(self) -> float | None:
+        current_media = self._player.get("current_media") or {}
+        volume = current_media.get("volume_level")
+        if isinstance(volume, (int, float)):
+            return max(0.0, min(1.0, float(volume) / 100.0))
+        return None
+
+    @property
+    def media_content_type(self) -> str | None:
+        if self._player.get("current_item"):
+            return MediaType.MUSIC
+        return None
+
+    @property
+    def media_title(self) -> str | None:
+        current_item = self._player.get("current_item") or {}
+        current_media = self._player.get("current_media") or {}
+        return current_item.get("name") or current_media.get("title")
+
+    @property
+    def media_artist(self) -> str | None:
+        current_item = self._player.get("current_item") or {}
+        artist = current_item.get("artist")
+        if isinstance(artist, str):
+            return artist
+        if isinstance(artist, dict):
+            return artist.get("name")
+        current_media = self._player.get("current_media") or {}
+        return current_media.get("artist")
+
+    @property
+    def media_album_name(self) -> str | None:
+        current_item = self._player.get("current_item") or {}
+        album = current_item.get("album")
+        if isinstance(album, str):
+            return album
+        if isinstance(album, dict):
+            return album.get("name")
+        return None
+
+    @property
+    def media_image_url(self) -> str | None:
+        current_item = self._player.get("current_item") or {}
+        current_media = self._player.get("current_media") or {}
+        for src in (current_item, current_media):
+            image = src.get("image") or src.get("image_url") or src.get("thumb")
+            if isinstance(image, str) and image.startswith("http"):
+                return image
+            metadata = src.get("metadata") or src.get("media_metadata")
+            if isinstance(metadata, dict):
+                img = metadata.get("image") or metadata.get("image_url")
+                if isinstance(img, str) and img.startswith("http"):
+                    return img
+        return None
+
+    @property
+    def media_duration(self) -> float | None:
+        current_item = self._player.get("current_item") or {}
+        duration = current_item.get("duration")
+        if isinstance(duration, (int, float)) and duration > 0:
+            return float(duration)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        player = self._player
+        return {
+            ATTR_ADDON_PLAYER_ID: player.get("addon_player_id"),
+            ATTR_MA_PLAYER_ID: player.get("ma_player_id"),
+            ATTR_ACTIVE_QUEUE_ID: player.get("active_queue_id"),
+            ATTR_QUEUE_STATE: player.get("queue_state"),
+            ATTR_SOURCE: player.get("source"),
+        }
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        player = self._player
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._attr_unique_id)},
+            manufacturer="ArchitechLabs",
+            model="Echoweave Proxy Player",
+            name=str(player.get("name") or self._addon_player_id),
+        )
+
+    # ── Playback commands ─────────────────────────────────────────────────
+
+    async def _send(
+        self,
+        command: str,
+        *,
+        volume: int | None = None,
+        media_id: str | None = None,
+        media_type: str | None = None,
+        query: str | None = None,
+    ) -> None:
+        await self.coordinator.api.send_command(
+            command,
+            self._addon_player_id,
+            volume=volume,
+            media_id=media_id,
+            media_type=media_type,
+            query=query,
+        )
+        await self.coordinator.async_request_refresh()
+
+    async def async_media_play(self) -> None:
+        await self._send("play")
+
+    async def async_media_pause(self) -> None:
+        await self._send("pause")
+
+    async def async_media_stop(self) -> None:
+        await self._send("stop")
+
+    async def async_media_next_track(self) -> None:
+        await self._send("next")
+
+    async def async_media_previous_track(self) -> None:
+        await self._send("previous")
+
+    async def async_set_volume_level(self, volume: float) -> None:
+        await self._send("volume_set", volume=round(max(0.0, min(1.0, volume)) * 100))
+
+    async def async_play_media(
+        self, media_type: str, media_id: str, **kwargs: Any
+    ) -> None:
+        """Play media by URI or search query.
+
+        Music Assistant and the HA UI both call this method.
+        If media_id looks like a URI (contains ://), send as play_media.
+        Otherwise, treat as a search query via play_query.
+        """
+        if "://" in media_id:
+            await self._send("play_media", media_id=media_id, media_type=media_type)
+        else:
+            await self._send("play_query", query=media_id)

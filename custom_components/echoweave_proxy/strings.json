@@ -1,0 +1,33 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Echoweave Proxy",
+        "description": "Connect to the Echo Bridge addon running on this Home Assistant instance. The addon URL is usually auto-detected.",
+        "data": {
+          "addon_url": "Echo Bridge addon URL",
+          "scan_interval": "Refresh interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the Echo Bridge addon. Is it running?"
+    },
+    "abort": {
+      "already_configured": "Integration is already configured.",
+      "cannot_connect": "Addon not reachable — will retry on next restart.",
+      "no_addon_url": "No addon URL provided."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Echoweave Proxy",
+        "data": {
+          "addon_url": "Echo Bridge addon URL",
+          "scan_interval": "Refresh interval (seconds)"
+        }
+      }
+    }
+  }
+}
