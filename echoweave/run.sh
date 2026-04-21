@@ -21,6 +21,8 @@ export ECHO_BACKEND_WS_TOKEN="$(bashio::config 'backend_ws_token')"
 export ECHO_BACKEND_INSTANCE_ID="$(bashio::config 'backend_instance_id')"
 export ECHO_PROXY_PLAYER_PREFIX="$(bashio::config 'proxy_player_prefix')"
 export ECHO_PROXY_PLAYER_FILTER="$(bashio::config 'proxy_player_filter')"
+export ECHO_WORKER_URL="$(bashio::config 'worker_url')"
+export ECHO_WORKER_SECRET="$(bashio::config 'worker_secret')"
 
 # These may be overridden by auto-discovery below
 export ECHO_LOCAL_MA_URL="$(bashio::config 'local_ma_url')"
