@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     proxy_status_push: bool = True
     proxy_status_poll_interval: int = 3
     proxy_player_filter: str = ""
+    # When set to a MA player_id, volume commands for players without volume support
+    # are forwarded to this player (e.g. "Nitish's Echo Dot" when the primary player
+    # is a UPnP Echo Dot that doesn't support volume via UPnP).
+    proxy_volume_player: str = ""
 
     # ── Worker registration ──────────────────────────────────────────────────
     worker_url: str = "https://echo-api.gethomeassistant.com"

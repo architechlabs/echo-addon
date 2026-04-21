@@ -210,6 +210,49 @@ class LocalProxyService:
             return player_id, queue_id
         return ma_player_id, ma_player_id
 
+    @staticmethod
+    def _player_mac(player: dict[str, Any]) -> str | None:
+        """Extract the MAC address from a MA player dict, or None if unavailable."""
+        device_info = player.get("device_info") or {}
+        mac = device_info.get("mac_address") or (device_info.get("identifiers") or {}).get("mac_address")
+        return str(mac).lower().replace("-", ":") if mac else None
+
+    def _find_volume_companion(
+        self,
+        all_players: list[dict[str, Any]],
+        target_player_id: str,
+    ) -> str | None:
+        """Find a companion MA player that shares the same physical device (by MAC address)
+        and supports volume_set. Used to route volume commands from UPnP players (which
+        Amazon blocks volume on) to the Alexa representation of the same device."""
+        # Config override takes priority
+        override = self._settings.proxy_volume_player.strip()
+        if override:
+            logger.info("Volume override configured: routing volume to '%s'", override)
+            return override
+
+        # Auto-detect via shared MAC address
+        target = next((p for p in all_players if str(p.get("player_id") or "") == target_player_id), None)
+        if not target:
+            return None
+        target_mac = self._player_mac(target)
+        if not target_mac:
+            logger.debug("Cannot auto-detect volume companion for %s: no MAC address", target_player_id)
+            return None
+        for player in all_players:
+            pid = str(player.get("player_id") or "")
+            if pid == target_player_id:
+                continue
+            if "volume_set" not in (player.get("supported_features") or []):
+                continue
+            if self._player_mac(player) == target_mac:
+                logger.info(
+                    "Volume companion auto-detected: %s → %s (shared MAC %s)",
+                    target_player_id, pid, target_mac,
+                )
+                return pid
+        return None
+
     async def execute(self, request: ProxyCommandRequest) -> dict[str, Any]:
         if request.command == "refresh":
             return {
@@ -231,7 +274,28 @@ class LocalProxyService:
             elif request.command == "volume_set":
                 if request.volume is None:
                     raise ValueError("volume is required for volume_set")
-                await ma.set_volume(ma_player_id, request.volume)
+                # Determine which player to actually send volume to.
+                # UPnP Echo Dots and similar devices have volume_set blocked by the manufacturer.
+                # If the target doesn't support volume, find a companion (Alexa player for the
+                # same physical device) and route to it instead.
+                all_players = await ma.get_players()
+                target_player = next(
+                    (p for p in all_players if str(p.get("player_id") or "") == ma_player_id), None
+                )
+                target_features = (target_player.get("supported_features") or []) if target_player else []
+                vol_player_id = ma_player_id
+                if "volume_set" not in target_features:
+                    companion = self._find_volume_companion(all_players, ma_player_id)
+                    if companion:
+                        vol_player_id = companion
+                    else:
+                        logger.warning(
+                            "Player %s has no volume_set support and no companion found; "
+                            "attempting anyway. Set 'proxy_volume_player' in addon config "
+                            "to force-route to a specific player (e.g. 'Nitish\\'s Echo Dot').",
+                            ma_player_id,
+                        )
+                await ma.set_volume(vol_player_id, request.volume)
             elif request.command == "mute":
                 if request.muted is None:
                     raise ValueError("muted (bool) is required for mute")
