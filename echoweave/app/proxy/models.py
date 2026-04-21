@@ -34,6 +34,7 @@ class ProxyPlayerSnapshot(BaseModel):
     available: bool
     state: str
     powered: bool | None = None
+    volume_level: float | None = None  # 0.0–1.0 HA scale
     active_queue_id: str | None = None
     queue_state: str | None = None
     current_index: int | None = None

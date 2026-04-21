@@ -212,9 +212,9 @@ class MusicAssistantClient:
             except MusicAssistantError as exc:
                 last_exc = exc
                 err = str(exc)
-                # Retry only on routing errors (404/500), not on auth or logic errors
+                # Retry on routing errors (404/500) OR MA RPC errors (command renamed between versions)
                 if idx < len(commands) - 1 and (
-                    "API 404" in err or "API 500" in err
+                    "API 404" in err or "API 500" in err or "RPC error" in err
                 ):
                     logger.debug("MA command=%s failed, trying next fallback", cmd)
                     continue
@@ -243,25 +243,31 @@ class MusicAssistantClient:
 
     async def get_queue_items(self, queue_id: str) -> list[dict[str, Any]]:
         """Return the items currently in a player queue."""
-        result = await self._command_fallback(
-            ["player_queues/items", "playerqueues/items"],
-            queue_id=queue_id,
-        )
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict):
-            items = result.get("items") or result.get("result") or []
-            return items if isinstance(items, list) else []
+        try:
+            result = await self._command_fallback(
+                ["player_queues/items", "playerqueues/items"],
+                queue_id=queue_id,
+            )
+            if isinstance(result, list):
+                return result
+            if isinstance(result, dict):
+                items = result.get("items") or result.get("result") or []
+                return items if isinstance(items, list) else []
+        except MusicAssistantError:
+            logger.debug("Queue items unavailable for queue=%s (player may be idle)", queue_id)
         return []
 
     async def get_queue_state(self, queue_id: str) -> dict[str, Any]:
         """Return state for a specific player queue (includes current_index)."""
-        result = await self._command_fallback(
-            ["player_queues/get", "playerqueues/get"],
-            queue_id=queue_id,
-        )
-        if isinstance(result, dict):
-            return result
+        try:
+            result = await self._command_fallback(
+                ["player_queues/get", "playerqueues/get"],
+                queue_id=queue_id,
+            )
+            if isinstance(result, dict):
+                return result
+        except MusicAssistantError:
+            logger.debug("Queue state unavailable for queue=%s (player may be idle)", queue_id)
         return {}
 
     async def get_current_queue_item(self, queue_id: str) -> Optional[dict[str, Any]]:

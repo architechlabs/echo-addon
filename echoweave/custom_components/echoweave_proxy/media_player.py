@@ -112,10 +112,10 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     @property
     def volume_level(self) -> float | None:
-        current_media = self._player.get("current_media") or {}
-        volume = current_media.get("volume_level")
-        if isinstance(volume, (int, float)):
-            return max(0.0, min(1.0, float(volume) / 100.0))
+        # volume_level is pre-converted to 0.0-1.0 in the proxy snapshot
+        vol = self._player.get("volume_level")
+        if isinstance(vol, (int, float)):
+            return max(0.0, min(1.0, float(vol)))
         return None
 
     @property
@@ -128,40 +128,69 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
     def media_title(self) -> str | None:
         current_item = self._player.get("current_item") or {}
         current_media = self._player.get("current_media") or {}
-        return current_item.get("name") or current_media.get("title")
+        # MA 2.x: queue item wraps the real track in 'media_item'
+        media_item = current_item.get("media_item") or {}
+        return (
+            current_item.get("name")
+            or media_item.get("name")
+            or current_media.get("title")
+            or current_media.get("name")
+        )
 
     @property
     def media_artist(self) -> str | None:
         current_item = self._player.get("current_item") or {}
-        artist = current_item.get("artist")
-        if isinstance(artist, str):
-            return artist
-        if isinstance(artist, dict):
-            return artist.get("name")
+        # MA queue items use 'artists' (list), not 'artist'
+        artists = current_item.get("artists") or current_item.get("artist")
+        if isinstance(artists, list) and artists:
+            first = artists[0]
+            if isinstance(first, str):
+                return first
+            if isinstance(first, dict):
+                return first.get("name") or first.get("item_id") or ""
+        if isinstance(artists, str):
+            return artists
+        if isinstance(artists, dict):
+            return artists.get("name")
+        # Fallback: check media_item inside queue item (MA 2.x structure)
+        media_item = current_item.get("media_item") or {}
+        mi_artists = media_item.get("artists") or []
+        if isinstance(mi_artists, list) and mi_artists:
+            first = mi_artists[0]
+            if isinstance(first, dict):
+                return first.get("name") or ""
         current_media = self._player.get("current_media") or {}
         return current_media.get("artist")
 
     @property
     def media_album_name(self) -> str | None:
         current_item = self._player.get("current_item") or {}
-        album = current_item.get("album")
-        if isinstance(album, str):
-            return album
-        if isinstance(album, dict):
-            return album.get("name")
+        media_item = current_item.get("media_item") or {}
+        for src in (current_item, media_item):
+            album = src.get("album")
+            if isinstance(album, str) and album:
+                return album
+            if isinstance(album, dict):
+                return album.get("name")
         return None
 
     @property
     def media_image_url(self) -> str | None:
         current_item = self._player.get("current_item") or {}
         current_media = self._player.get("current_media") or {}
-        for src in (current_item, current_media):
+        media_item = current_item.get("media_item") or {}
+        for src in (current_item, media_item, current_media):
             image = src.get("image") or src.get("image_url") or src.get("thumb")
+            # MA 2.x: image is a dict with 'path' key
+            if isinstance(image, dict):
+                image = image.get("path") or image.get("url") or ""
             if isinstance(image, str) and image.startswith("http"):
                 return image
             metadata = src.get("metadata") or src.get("media_metadata")
             if isinstance(metadata, dict):
                 img = metadata.get("image") or metadata.get("image_url")
+                if isinstance(img, dict):
+                    img = img.get("path") or img.get("url") or ""
                 if isinstance(img, str) and img.startswith("http"):
                     return img
         return None

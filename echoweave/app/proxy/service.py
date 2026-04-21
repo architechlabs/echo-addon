@@ -108,6 +108,10 @@ class LocalProxyService:
             if 0 <= current_index < len(queue_items):
                 current_item = queue_items[current_index]
 
+        # MA volume is 0-100 integer; HA expects 0.0-1.0 float
+        raw_vol = player.get("volume_level")
+        volume_level = float(raw_vol) / 100.0 if isinstance(raw_vol, (int, float)) else None
+
         return ProxyPlayerSnapshot(
             addon_player_id=self.addon_player_id(player_id),
             ma_player_id=player_id,
@@ -115,6 +119,7 @@ class LocalProxyService:
             available=bool(player.get("available", False)),
             state=str(player.get("state") or player.get("playback_state") or "unknown"),
             powered=player.get("powered"),
+            volume_level=volume_level,
             active_queue_id=queue_id or None,
             queue_state=str(queue_state.get("state") or "") or None,
             current_index=queue_state.get("current_index"),
