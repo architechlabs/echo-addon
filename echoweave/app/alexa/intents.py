@@ -127,21 +127,20 @@ async def _handle_play(
     settings: Any,
     user_config: dict[str, Any],
 ) -> dict[str, Any]:
-    """PlayIntent — start playing the current MA queue item on this Alexa device."""
+    """PlayIntent — resume / start the current MA queue on the selected player."""
     device_id = extract_device_id(body)
     store = get_session_store()
 
     queue_id = _queue_id_from_session(body) or user_config.get("player_id", "")
 
     try:
-        # Try to discover an active queue if we don't have one
         if not queue_id:
             queue_id = await ma.get_active_queue_id()
 
         if not queue_id:
             logger.warning("PlayIntent: no queue_id available device=%s", device_id)
             return build_response(
-                speech="I couldn't find an active Music Assistant player. "
+                speech="I couldn't find a Music Assistant player. "
                        "Make sure a player is set up in Music Assistant.",
             )
 
@@ -153,23 +152,24 @@ async def _handle_play(
                        "Try saying: play jazz, or play something by Radiohead.",
             )
 
-        stream_url = _build_public_stream_url(user_config["token"], queue_id, item["queue_item_id"], settings.public_url)
-        token = encode_token(queue_id, item["queue_item_id"])
+        await ma.play(queue_id)
+
+        name = item.get("name", "")
+        speech = f"Playing {name} on Music Assistant." if name else "Playing on Music Assistant."
 
         logger.info(
-            "PlayIntent: queue=%s item=%s name=%s url=%s device=%s",
-            queue_id, item["queue_item_id"], item.get("name", "?"), stream_url, device_id,
+            "PlayIntent: queue=%s item=%s name=%s device=%s",
+            queue_id, item.get("queue_item_id", "?"), name, device_id,
         )
 
         store.update(
             device_id,
             queue_id=queue_id,
-            current_token=token,
             play_state=PlayState.PLAYING,
             last_event="PlayIntent",
         )
 
-        return build_response(directives=[play_directive(url=stream_url, token=token)])
+        return build_response(speech=speech)
 
     except Exception:
         logger.exception("PlayIntent failed device=%s", device_id)
@@ -182,7 +182,7 @@ async def _handle_play_audio(
     settings: Any,
     user_config: dict[str, Any],
 ) -> dict[str, Any]:
-    """PlayAudio — search MA for the query and play the top result."""
+    """PlayAudio — search MA for the query and play the top result on the MA player."""
     device_id = extract_device_id(body)
     query = _extract_query(body)
     store = get_session_store()
@@ -194,6 +194,12 @@ async def _handle_play_audio(
     if not queue_id:
         queue_id = await ma.get_active_queue_id()
 
+    if not queue_id:
+        return build_response(
+            speech="I couldn't find a Music Assistant player to play on. "
+                   "Please re-link your account and select a player."
+        )
+
     logger.info("PlayAudio: query=%r queue=%s device=%s", query, queue_id, device_id)
 
     try:
@@ -204,25 +210,28 @@ async def _handle_play_audio(
                 speech=f"I couldn't find anything matching '{query}' in Music Assistant.",
             )
 
-        resolved_queue_id = result["queue_id"]
-        item_id = result["queue_item_id"]
-        stream_url = _build_public_stream_url(user_config["token"], resolved_queue_id, item_id, settings.public_url)
-        token = encode_token(resolved_queue_id, item_id)
+        name = result.get("name", "")
+        artist = result.get("artist", "")
+        if name and artist:
+            speech = f"Playing {name} by {artist} on Music Assistant."
+        elif name:
+            speech = f"Playing {name} on Music Assistant."
+        else:
+            speech = f"Playing {query} on Music Assistant."
 
         logger.info(
-            "PlayAudio: resolved queue=%s item=%s name=%s url=%s device=%s",
-            resolved_queue_id, item_id, result.get("name", "?"), stream_url, device_id,
+            "PlayAudio: playing queue=%s name=%s artist=%s device=%s",
+            result["queue_id"], name, artist, device_id,
         )
 
         store.update(
             device_id,
-            queue_id=resolved_queue_id,
-            current_token=token,
+            queue_id=result["queue_id"],
             play_state=PlayState.PLAYING,
             last_event="PlayAudio",
         )
 
-        return build_response(directives=[play_directive(url=stream_url, token=token)])
+        return build_response(speech=speech)
 
     except Exception:
         logger.exception("PlayAudio failed query=%r device=%s", query, device_id)
@@ -269,61 +278,31 @@ async def _handle_resume(
     settings: Any,
     user_config: dict[str, Any],
 ) -> dict[str, Any]:
-    """ResumeIntent — resume playback from the saved session position."""
+    """ResumeIntent — resume playback on the MA player."""
     device_id = extract_device_id(body)
-    audio_ctx = _get_audio_context(body)
-    current_token = audio_ctx.get("token", "")
-    offset_ms = int(audio_ctx.get("offsetInMilliseconds", 0))
     store = get_session_store()
-    session = store.get(device_id)
 
     queue_id = _queue_id_from_session(body) or user_config.get("player_id", "")
     if not queue_id:
         queue_id = await ma.get_active_queue_id()
 
-    logger.info("ResumeIntent: queue=%s offset=%d device=%s", queue_id, offset_ms, device_id)
+    logger.info("ResumeIntent: queue=%s device=%s", queue_id, device_id)
+
+    if not queue_id:
+        return build_response(speech="There's nothing to resume. Say play to start music.")
 
     try:
-        # If we have a token from the AudioPlayer context, use the queue it points to
-        if current_token:
-            parts = decode_token(current_token)
-            if parts and parts.queue_id:
-                queue_id = parts.queue_id
-
-        if not queue_id:
-            return build_response(speech="There's nothing to resume. Say play to start music.")
-
-        # Tell MA to resume
-        try:
-            await ma.play(queue_id)
-            logger.info("ResumeIntent: MA play called queue=%s", queue_id)
-        except Exception:
-            logger.warning("ResumeIntent: could not send play to MA", exc_info=True)
-
-        item = await ma.get_current_queue_item(queue_id)
-        if item is None:
-            return build_response(speech="There's nothing to resume.")
-
-        stream_url = _build_public_stream_url(user_config["token"], queue_id, item["queue_item_id"], settings.public_url)
-        token = encode_token(queue_id, item["queue_item_id"])
-
-        logger.info(
-            "ResumeIntent: token=%s offset=%d url=%s device=%s",
-            token, offset_ms, stream_url, device_id,
-        )
+        await ma.play(queue_id)
+        logger.info("ResumeIntent: MA play called queue=%s", queue_id)
 
         store.update(
             device_id,
             queue_id=queue_id,
-            current_token=token,
             play_state=PlayState.PLAYING,
-            offset_ms=offset_ms,
             last_event="ResumeIntent",
         )
 
-        return build_response(
-            directives=[play_directive(url=stream_url, token=token, offset_ms=offset_ms)]
-        )
+        return build_response(speech="Resuming Music Assistant.")
 
     except Exception:
         logger.exception("ResumeIntent failed device=%s", device_id)
@@ -376,27 +355,22 @@ async def _handle_next(
         await ma.next_track(queue_id)
         logger.info("NextIntent: MA next sent queue=%s", queue_id)
 
+        import asyncio
+        await asyncio.sleep(0.4)
         item = await ma.get_current_queue_item(queue_id)
-        if item is None:
-            return build_response(speech="There are no more tracks in the queue.")
+        name = item.get("name", "") if item else ""
+        speech = f"Playing {name}." if name else "Playing next track."
 
-        stream_url = _build_public_stream_url(user_config["token"], queue_id, item["queue_item_id"], settings.public_url)
-        token = encode_token(queue_id, item["queue_item_id"])
-
-        logger.info(
-            "NextIntent: next track=%s url=%s device=%s",
-            item.get("name", "?"), stream_url, device_id,
-        )
+        logger.info("NextIntent: next track=%s device=%s", name or "?", device_id)
 
         store.update(
             device_id,
             queue_id=queue_id,
-            current_token=token,
             play_state=PlayState.PLAYING,
             last_event="NextIntent",
         )
 
-        return build_response(directives=[play_directive(url=stream_url, token=token)])
+        return build_response(speech=speech)
 
     except Exception:
         logger.exception("NextIntent failed device=%s", device_id)
@@ -426,27 +400,22 @@ async def _handle_previous(
         await ma.prev_track(queue_id)
         logger.info("PreviousIntent: MA previous sent queue=%s", queue_id)
 
+        import asyncio
+        await asyncio.sleep(0.4)
         item = await ma.get_current_queue_item(queue_id)
-        if item is None:
-            return build_response(speech="There are no tracks to go back to.")
+        name = item.get("name", "") if item else ""
+        speech = f"Playing {name}." if name else "Playing previous track."
 
-        stream_url = _build_public_stream_url(user_config["token"], queue_id, item["queue_item_id"], settings.public_url)
-        token = encode_token(queue_id, item["queue_item_id"])
-
-        logger.info(
-            "PreviousIntent: prev track=%s url=%s device=%s",
-            item.get("name", "?"), stream_url, device_id,
-        )
+        logger.info("PreviousIntent: prev track=%s device=%s", name or "?", device_id)
 
         store.update(
             device_id,
             queue_id=queue_id,
-            current_token=token,
             play_state=PlayState.PLAYING,
             last_event="PreviousIntent",
         )
 
-        return build_response(directives=[play_directive(url=stream_url, token=token)])
+        return build_response(speech=speech)
 
     except Exception:
         logger.exception("PreviousIntent failed device=%s", device_id)
