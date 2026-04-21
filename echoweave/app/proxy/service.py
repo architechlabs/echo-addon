@@ -119,11 +119,13 @@ class LocalProxyService:
 
         # MA volume field — try all known field names across MA versions
         # MA 2.x: "volume_level" (int 0-100); some builds: "volume" or "current_volume"
-        raw_vol = (
-            player.get("volume_level")
-            or player.get("volume")
-            or player.get("current_volume")
-        )
+        # Use explicit None check so volume=0 is not treated as missing.
+        raw_vol = None
+        for _vol_key in ("volume_level", "volume", "current_volume"):
+            _v = player.get(_vol_key)
+            if _v is not None:
+                raw_vol = _v
+                break
         # If MA returns it as a float 0.0-1.0, keep as-is; if int/float > 1.0 treat as 0-100
         if isinstance(raw_vol, (int, float)):
             volume_level = float(raw_vol) / 100.0 if raw_vol > 1.0 else float(raw_vol)

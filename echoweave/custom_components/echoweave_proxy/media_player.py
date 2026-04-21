@@ -97,15 +97,18 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
                 return player
         return {}
 
-    def _clear_optimistic(self) -> None:
-        """Clear optimistic overrides when coordinator data refreshes."""
-        self._optimistic_volume = None
-        self._optimistic_state = None
-
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Coordinator refreshed — clear optimistic overrides then re-render."""
-        self._clear_optimistic()
+        """Coordinator refreshed — selectively clear optimistic overrides then re-render.
+
+        Only wipe _optimistic_volume once MA confirms a real (non-None) volume.
+        For players that permanently report volume_level=None (e.g. UPnP Echo Dots),
+        the slider stays at the last user-set value rather than snapping back to 0.
+        """
+        real_vol = self._player.get("volume_level")
+        if real_vol is not None and self._optimistic_volume is not None:
+            self._optimistic_volume = None
+        self._optimistic_state = None
         super()._handle_coordinator_update()
 
     @property
