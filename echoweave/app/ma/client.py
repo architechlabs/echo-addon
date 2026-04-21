@@ -156,17 +156,21 @@ class MusicAssistantClient:
                 resp = await client.post(self._api_url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
+                # Always log the full raw body for debugging
+                logger.debug("MA raw response: %s  body=%s", command, json.dumps(data, separators=(",", ":"), default=str)[:1000])
                 # MA returns HTTP 200 even for errors — error is in the JSON body.
-                if isinstance(data, dict) and "error" in data and "result" not in data:
-                    err_detail = data["error"]
-                    logger.warning(
-                        "MA RPC error: command=%s  error=%s", command, err_detail
-                    )
-                    raise MusicAssistantError(
-                        f"MA RPC error for {command}: {err_detail}"
-                    )
+                # Detect error if: "error" key present AND non-null, regardless of "result"
+                if isinstance(data, dict):
+                    err_val = data.get("error")
+                    if err_val is not None and err_val is not False and err_val != "":
+                        logger.warning(
+                            "MA RPC error: command=%s  error=%s", command, err_val
+                        )
+                        raise MusicAssistantError(
+                            f"MA RPC error for {command}: {err_val}"
+                        )
                 result = data.get("result", data) if isinstance(data, dict) else data
-                logger.info("MA response: %s  status=%d", command, resp.status_code)
+                logger.info("MA response: %s  status=%d  result_type=%s", command, resp.status_code, type(result).__name__)
                 return result
             except httpx.ConnectError as exc:
                 last_exc = exc
@@ -598,11 +602,22 @@ class MusicAssistantClient:
         """Set player volume (0-100)."""
         vol = max(0, min(100, int(volume)))
         logger.info("MA volume: player=%s volume=%d", player_id, vol)
-        await self._command(
-            "players/cmd/volume_set",
-            player_id=player_id,
-            volume_level=vol,
-        )
+        try:
+            await self._command(
+                "players/cmd/volume_set",
+                player_id=player_id,
+                volume_level=vol,
+            )
+        except MusicAssistantError as exc:
+            # Some MA builds use "volume" instead of "volume_level"
+            logger.warning("players/cmd/volume_set failed (%s), retrying with 'volume' param", exc)
+            await self._command(
+                "players/cmd/volume_set",
+                player_id=player_id,
+                volume=vol,
+            )
+        # Brief pause so MA state reflects the change before any snapshot reads
+        await asyncio.sleep(0.3)
 
     async def set_mute(self, player_id: str, muted: bool) -> None:
         """Mute or unmute a player."""

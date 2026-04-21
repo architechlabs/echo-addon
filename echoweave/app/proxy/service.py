@@ -94,6 +94,15 @@ class LocalProxyService:
         player_id = str(player.get("player_id") or "")
         queue_id = str(player.get("active_queue") or player_id or "")
 
+        # Log raw player data to diagnose field names (DEBUG only)
+        logger.debug(
+            "MA raw player: id=%s  keys=%s  volume_level=%s  state=%s",
+            player_id,
+            list(player.keys()),
+            player.get("volume_level"),
+            player.get("state"),
+        )
+
         queue_state: dict[str, Any] = {}
         queue_items: list[dict[str, Any]] = []
         if queue_id:
@@ -108,9 +117,19 @@ class LocalProxyService:
             if 0 <= current_index < len(queue_items):
                 current_item = queue_items[current_index]
 
-        # MA volume is 0-100 integer; HA expects 0.0-1.0 float
-        raw_vol = player.get("volume_level")
-        volume_level = float(raw_vol) / 100.0 if isinstance(raw_vol, (int, float)) else None
+        # MA volume field — try all known field names across MA versions
+        # MA 2.x: "volume_level" (int 0-100); some builds: "volume" or "current_volume"
+        raw_vol = (
+            player.get("volume_level")
+            or player.get("volume")
+            or player.get("current_volume")
+        )
+        # If MA returns it as a float 0.0-1.0, keep as-is; if int/float > 1.0 treat as 0-100
+        if isinstance(raw_vol, (int, float)):
+            volume_level = float(raw_vol) / 100.0 if raw_vol > 1.0 else float(raw_vol)
+        else:
+            volume_level = None
+        logger.debug("MA player %s volume: raw=%s  converted=%s", player_id, raw_vol, volume_level)
         is_volume_muted = player.get("volume_muted") or player.get("muted")
 
         return ProxyPlayerSnapshot(

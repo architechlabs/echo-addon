@@ -7,7 +7,7 @@ from typing import Any
 from homeassistant.components.media_player import MediaPlayerEntity, MediaType
 from homeassistant.components.media_player.const import MediaPlayerEntityFeature, MediaPlayerState
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -86,6 +86,9 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         self._entry = entry
         self._addon_player_id = addon_player_id
         self._attr_unique_id = f"echoweave_{addon_player_id.replace(':', '_')}"
+        # Optimistic state overrides — cleared on next coordinator refresh
+        self._optimistic_volume: float | None = None
+        self._optimistic_state: str | None = None
 
     @property
     def _player(self) -> dict[str, Any]:
@@ -93,6 +96,17 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
             if str(player.get("addon_player_id") or "") == self._addon_player_id:
                 return player
         return {}
+
+    def _clear_optimistic(self) -> None:
+        """Clear optimistic overrides when coordinator data refreshes."""
+        self._optimistic_volume = None
+        self._optimistic_state = None
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Coordinator refreshed — clear optimistic overrides then re-render."""
+        self._clear_optimistic()
+        super()._handle_coordinator_update()
 
     @property
     def available(self) -> bool:
@@ -108,11 +122,16 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     @property
     def state(self) -> MediaPlayerState | None:
+        if self._optimistic_state:
+            return _STATE_MAP.get(self._optimistic_state, MediaPlayerState.IDLE)
         state = str(self._player.get("state") or "").lower()
         return _STATE_MAP.get(state, MediaPlayerState.IDLE if self.available else None)
 
     @property
     def volume_level(self) -> float | None:
+        # Use optimistic value immediately after volume command (before coordinator refresh)
+        if self._optimistic_volume is not None:
+            return self._optimistic_volume
         # volume_level is pre-converted to 0.0-1.0 in the proxy snapshot
         vol = self._player.get("volume_level")
         if isinstance(vol, (int, float)):
@@ -256,12 +275,18 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         await self.coordinator.async_request_refresh()
 
     async def async_media_play(self) -> None:
+        self._optimistic_state = "playing"
+        self.async_write_ha_state()
         await self._send("play")
 
     async def async_media_pause(self) -> None:
+        self._optimistic_state = "paused"
+        self.async_write_ha_state()
         await self._send("pause")
 
     async def async_media_stop(self) -> None:
+        self._optimistic_state = "idle"
+        self.async_write_ha_state()
         await self._send("stop")
 
     async def async_media_next_track(self) -> None:
@@ -271,7 +296,11 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         await self._send("previous")
 
     async def async_set_volume_level(self, volume: float) -> None:
-        await self._send("volume_set", volume=round(max(0.0, min(1.0, volume)) * 100))
+        clamped = max(0.0, min(1.0, volume))
+        # Optimistically update slider so HA UI doesn't reset while command is in-flight
+        self._optimistic_volume = clamped
+        self.async_write_ha_state()
+        await self._send("volume_set", volume=round(clamped * 100))
 
     async def async_mute_volume(self, mute: bool) -> None:
         await self._send("mute", muted=mute)
