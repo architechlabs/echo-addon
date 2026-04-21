@@ -65,16 +65,24 @@ _STATE_MAP = {
 
 class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], MediaPlayerEntity):
     _attr_has_entity_name = True
-    _attr_supported_features = (
+    _BASE_FEATURES = (
         MediaPlayerEntityFeature.PLAY
         | MediaPlayerEntityFeature.PAUSE
         | MediaPlayerEntityFeature.STOP
         | MediaPlayerEntityFeature.NEXT_TRACK
         | MediaPlayerEntityFeature.PREVIOUS_TRACK
-        | MediaPlayerEntityFeature.VOLUME_SET
-        | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.PLAY_MEDIA
     )
+    _VOLUME_FEATURES = (
+        MediaPlayerEntityFeature.VOLUME_SET
+        | MediaPlayerEntityFeature.VOLUME_MUTE
+    )
+
+    @property
+    def supported_features(self) -> MediaPlayerEntityFeature:
+        if self._player.get("has_volume_support", True):
+            return self._BASE_FEATURES | self._VOLUME_FEATURES
+        return self._BASE_FEATURES
 
     def __init__(
         self,

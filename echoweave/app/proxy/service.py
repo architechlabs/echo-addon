@@ -134,6 +134,10 @@ class LocalProxyService:
         logger.debug("MA player %s volume: raw=%s  converted=%s", player_id, raw_vol, volume_level)
         is_volume_muted = player.get("volume_muted") or player.get("muted")
 
+        # Determine if this player actually supports volume_set
+        supported_features = player.get("supported_features") or []
+        has_volume_support = "volume_set" in supported_features
+
         return ProxyPlayerSnapshot(
             addon_player_id=self.addon_player_id(player_id),
             ma_player_id=player_id,
@@ -143,6 +147,7 @@ class LocalProxyService:
             powered=player.get("powered"),
             volume_level=volume_level,
             is_volume_muted=bool(is_volume_muted) if is_volume_muted is not None else None,
+            has_volume_support=has_volume_support,
             active_queue_id=queue_id or None,
             queue_state=str(queue_state.get("state") or "") or None,
             current_index=queue_state.get("current_index"),

@@ -44,6 +44,7 @@ class ProxyPlayerSnapshot(BaseModel):
     source: str | None = None
     current_item: dict[str, Any] | None = None
     current_media: dict[str, Any] | None = None
+    has_volume_support: bool = True  # False for players that don't expose volume_set
 
 
 class ProxySnapshot(BaseModel):
