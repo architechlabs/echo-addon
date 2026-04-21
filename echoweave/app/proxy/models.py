@@ -15,6 +15,7 @@ class ProxyCommandRequest(BaseModel):
         "next",
         "previous",
         "volume_set",
+        "mute",
         "play_query",
         "play_media",
         "refresh",
@@ -24,6 +25,7 @@ class ProxyCommandRequest(BaseModel):
     media_id: str | None = None
     media_type: str | None = None
     volume: int | None = Field(default=None, ge=0, le=100)
+    muted: bool | None = None
     request_id: str | None = None
 
 
@@ -35,6 +37,7 @@ class ProxyPlayerSnapshot(BaseModel):
     state: str
     powered: bool | None = None
     volume_level: float | None = None  # 0.0–1.0 HA scale
+    is_volume_muted: bool | None = None
     active_queue_id: str | None = None
     queue_state: str | None = None
     current_index: int | None = None

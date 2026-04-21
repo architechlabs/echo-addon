@@ -97,23 +97,27 @@ INTEGRATION_DST="${HA_CONFIG}/custom_components/echoweave_proxy"
 if [ "${AUTO_SETUP_INTEGRATION}" = "true" ] && [ -d "${INTEGRATION_SRC}" ]; then
   NEEDS_RESTART=false
 
+  SRC_VERSION=$(python3 -c "import json; print(json.load(open('${INTEGRATION_SRC}/manifest.json'))['version'])" 2>/dev/null) || SRC_VERSION="unknown"
+
   if [ ! -d "${INTEGRATION_DST}" ]; then
-    bashio::log.info "Installing Echoweave Proxy integration to ${INTEGRATION_DST}..."
+    bashio::log.info "Installing Echoweave Proxy integration v${SRC_VERSION} to ${INTEGRATION_DST}..."
     mkdir -p "${INTEGRATION_DST}"
     cp -r "${INTEGRATION_SRC}/"* "${INTEGRATION_DST}/"
     touch "${INTEGRATION_DST}/.addon_managed"
     NEEDS_RESTART=true
     bashio::log.info "Integration installed successfully."
   elif [ -f "${INTEGRATION_DST}/.addon_managed" ]; then
-    # Update existing addon-managed installation
-    SRC_VERSION=$(python3 -c "import json; print(json.load(open('${INTEGRATION_SRC}/manifest.json'))['version'])" 2>/dev/null) || SRC_VERSION=""
-    DST_VERSION=$(python3 -c "import json; print(json.load(open('${INTEGRATION_DST}/manifest.json'))['version'])" 2>/dev/null) || DST_VERSION=""
-
-    if [ -n "${SRC_VERSION}" ] && [ "${SRC_VERSION}" != "${DST_VERSION}" ]; then
-      bashio::log.info "Updating integration from ${DST_VERSION} to ${SRC_VERSION}..."
-      cp -r "${INTEGRATION_SRC}/"* "${INTEGRATION_DST}/"
-      touch "${INTEGRATION_DST}/.addon_managed"
+    # Always overwrite addon-managed installations so code changes deploy on restart
+    DST_VERSION=$(python3 -c "import json; print(json.load(open('${INTEGRATION_DST}/manifest.json'))['version'])" 2>/dev/null) || DST_VERSION="unknown"
+    if [ "${SRC_VERSION}" != "${DST_VERSION}" ]; then
+      bashio::log.info "Updating integration from v${DST_VERSION} to v${SRC_VERSION}..."
       NEEDS_RESTART=true
+    else
+      bashio::log.info "Refreshing addon-managed integration v${SRC_VERSION} (ensuring latest files)..."
+    fi
+    cp -r "${INTEGRATION_SRC}/"* "${INTEGRATION_DST}/"
+    touch "${INTEGRATION_DST}/.addon_managed"
+    if [ "${NEEDS_RESTART}" = "true" ]; then
       bashio::log.info "Integration updated."
     fi
   else

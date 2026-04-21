@@ -111,6 +111,7 @@ class LocalProxyService:
         # MA volume is 0-100 integer; HA expects 0.0-1.0 float
         raw_vol = player.get("volume_level")
         volume_level = float(raw_vol) / 100.0 if isinstance(raw_vol, (int, float)) else None
+        is_volume_muted = player.get("volume_muted") or player.get("muted")
 
         return ProxyPlayerSnapshot(
             addon_player_id=self.addon_player_id(player_id),
@@ -120,6 +121,7 @@ class LocalProxyService:
             state=str(player.get("state") or player.get("playback_state") or "unknown"),
             powered=player.get("powered"),
             volume_level=volume_level,
+            is_volume_muted=bool(is_volume_muted) if is_volume_muted is not None else None,
             active_queue_id=queue_id or None,
             queue_state=str(queue_state.get("state") or "") or None,
             current_index=queue_state.get("current_index"),
@@ -204,6 +206,10 @@ class LocalProxyService:
                 if request.volume is None:
                     raise ValueError("volume is required for volume_set")
                 await ma.set_volume(ma_player_id, request.volume)
+            elif request.command == "mute":
+                if request.muted is None:
+                    raise ValueError("muted (bool) is required for mute")
+                await ma.set_mute(ma_player_id, request.muted)
             elif request.command == "stop":
                 await ma.stop(queue_id)
             elif request.command == "play_query":

@@ -604,6 +604,15 @@ class MusicAssistantClient:
             volume_level=vol,
         )
 
+    async def set_mute(self, player_id: str, muted: bool) -> None:
+        """Mute or unmute a player."""
+        logger.info("MA mute: player=%s muted=%s", player_id, muted)
+        await self._command_fallback(
+            ["players/cmd/volume_mute", "players/cmd/mute"],
+            player_id=player_id,
+            muted=muted,
+        )
+
     # ── Stream URL resolution ─────────────────────────────────────────────────
 
     async def get_stream_url(self, queue_id: str, item_id: str) -> str:

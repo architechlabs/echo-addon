@@ -72,6 +72,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         | MediaPlayerEntityFeature.NEXT_TRACK
         | MediaPlayerEntityFeature.PREVIOUS_TRACK
         | MediaPlayerEntityFeature.VOLUME_SET
+        | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.PLAY_MEDIA
     )
 
@@ -116,6 +117,13 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         vol = self._player.get("volume_level")
         if isinstance(vol, (int, float)):
             return max(0.0, min(1.0, float(vol)))
+        return None
+
+    @property
+    def is_volume_muted(self) -> bool | None:
+        muted = self._player.get("is_volume_muted")
+        if isinstance(muted, bool):
+            return muted
         return None
 
     @property
@@ -231,6 +239,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         command: str,
         *,
         volume: int | None = None,
+        muted: bool | None = None,
         media_id: str | None = None,
         media_type: str | None = None,
         query: str | None = None,
@@ -239,6 +248,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
             command,
             self._addon_player_id,
             volume=volume,
+            muted=muted,
             media_id=media_id,
             media_type=media_type,
             query=query,
@@ -262,6 +272,9 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     async def async_set_volume_level(self, volume: float) -> None:
         await self._send("volume_set", volume=round(max(0.0, min(1.0, volume)) * 100))
+
+    async def async_mute_volume(self, mute: bool) -> None:
+        await self._send("mute", muted=mute)
 
     async def async_play_media(
         self, media_type: str, media_id: str, **kwargs: Any
