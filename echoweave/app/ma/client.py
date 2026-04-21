@@ -156,6 +156,15 @@ class MusicAssistantClient:
                 resp = await client.post(self._api_url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
+                # MA returns HTTP 200 even for errors — error is in the JSON body.
+                if isinstance(data, dict) and "error" in data and "result" not in data:
+                    err_detail = data["error"]
+                    logger.warning(
+                        "MA RPC error: command=%s  error=%s", command, err_detail
+                    )
+                    raise MusicAssistantError(
+                        f"MA RPC error for {command}: {err_detail}"
+                    )
                 result = data.get("result", data) if isinstance(data, dict) else data
                 logger.info("MA response: %s  status=%d", command, resp.status_code)
                 return result
@@ -380,26 +389,48 @@ class MusicAssistantClient:
                 "Enqueuing: queue=%s uri=%s name=%s", queue_id, play_uri, top.get("name", "?")
             )
 
-            try:
-                invalidate_session_cache(queue_id)
-                await self._command(
-                    "player_queues/play_media",
-                    queue_id=queue_id,
-                    media=play_uri,
-                    option="play",
-                )
-            except MusicAssistantError as exc:
-                logger.warning("play_media failed: %s — trying replace", exc)
+            play_media_ok = False
+            for option_key, option_val in [
+                ("option", "play"),
+                ("option", "replace"),
+                ("queue_option", "play"),
+            ]:
                 try:
+                    invalidate_session_cache(queue_id)
                     await self._command(
                         "player_queues/play_media",
                         queue_id=queue_id,
                         media=play_uri,
-                        option="replace",
+                        **{option_key: option_val},
                     )
-                except MusicAssistantError:
-                    logger.warning("play_media replace also failed", exc_info=True)
-                    continue
+                    logger.info(
+                        "play_media succeeded: queue=%s %s=%s",
+                        queue_id, option_key, option_val,
+                    )
+                    play_media_ok = True
+                    break
+                except MusicAssistantError as exc:
+                    logger.warning(
+                        "play_media %s=%s failed: %s", option_key, option_val, exc
+                    )
+
+            if not play_media_ok:
+                logger.warning(
+                    "play_media exhausted all options for queue=%s uri=%s",
+                    queue_id, play_uri,
+                )
+                continue
+
+            # Explicitly start playback — some MA versions only enqueue on play_media
+            await asyncio.sleep(0.25)
+            try:
+                await self._command_fallback(
+                    ["player_queues/play", "playerqueues/play"],
+                    queue_id=queue_id,
+                )
+                logger.debug("Explicit play sent after play_media: queue=%s", queue_id)
+            except MusicAssistantError as exc:
+                logger.debug("Explicit play after play_media (non-fatal): %s", exc)
 
             # Give MA a moment to enqueue the item, then read back the item ID
             await asyncio.sleep(0.3)
@@ -490,12 +521,24 @@ class MusicAssistantClient:
     # ── Playback controls ─────────────────────────────────────────────────────
 
     async def play(self, queue_id: str) -> None:
-        """Resume / start the queue."""
+        """Resume / start the queue.
+
+        Tries queue-level play first (player_queues/play), then falls back
+        to the player-level play command (players/cmd/play). The player-level
+        command is more reliable for UPnP/physical players that may be idle.
+        """
         logger.info("MA play: queue=%s", queue_id)
-        await self._command_fallback(
-            ["player_queues/play", "playerqueues/play"],
-            queue_id=queue_id,
-        )
+        try:
+            await self._command_fallback(
+                ["player_queues/play", "playerqueues/play"],
+                queue_id=queue_id,
+            )
+        except MusicAssistantError as exc:
+            logger.warning(
+                "Queue-level play failed (%s), trying player-level: queue=%s", exc, queue_id
+            )
+            # player-level command uses player_id, which equals queue_id for most players
+            await self._command("players/cmd/play", player_id=queue_id)
 
     async def pause(self, queue_id: str) -> None:
         """Pause the queue."""
