@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -11,6 +12,7 @@ from app.proxy.models import ProxyCommandRequest
 from app.proxy.service import BackendWebSocketBridge, LocalProxyService, websocket_status_session
 
 router = APIRouter(prefix="/proxy", tags=["proxy"])
+logger = logging.getLogger(__name__)
 
 
 def _proxy_service(request: Request) -> LocalProxyService:
@@ -87,6 +89,9 @@ async def proxy_command(payload: ProxyCommandRequest, request: Request) -> dict[
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Unexpected proxy command error: %s", exc)
+        return {"ok": False, "error": str(exc)}
 
 
 @router.websocket("/ws")

@@ -536,7 +536,72 @@ class LocalProxyService:
         try:
             ma_player_id, queue_id = await self._resolve_player_target(ma, request.addon_player_id)
             if request.command == "play":
-                await ma.play(queue_id, player_id=ma_player_id)
+                source_player_id = ma_player_id
+                if request.addon_player_id:
+                    source_player_id = self.resolve_player_id(request.addon_player_id)
+
+                if source_player_id.lower().startswith("upuuid"):
+                    all_players = await ma.get_players()
+                    companion_id = self._find_volume_companion(all_players, source_player_id)
+                    companion_player = next(
+                        (p for p in all_players if str(p.get("player_id") or "") == companion_id),
+                        None,
+                    ) if companion_id else None
+
+                    if companion_player is not None:
+                        companion_queue = str(
+                            companion_player.get("active_queue")
+                            or companion_player.get("queue_id")
+                            or companion_id
+                            or ""
+                        )
+                        source_player = next(
+                            (p for p in all_players if str(p.get("player_id") or "") == source_player_id),
+                            None,
+                        )
+                        source_queue = str(
+                            (source_player or {}).get("active_queue")
+                            or (source_player or {}).get("queue_id")
+                            or queue_id
+                            or source_player_id
+                            or ""
+                        )
+
+                        play_uri = ""
+                        source_state = await ma.get_queue_state(source_queue)
+                        source_item = source_state.get("current_item") if isinstance(source_state, dict) else None
+                        if not isinstance(source_item, dict):
+                            source_items = await ma.get_queue_items(source_queue)
+                            idx = source_state.get("current_index") if isinstance(source_state, dict) else None
+                            if isinstance(idx, int) and 0 <= idx < len(source_items):
+                                source_item = source_items[idx]
+                            elif source_items:
+                                source_item = source_items[0]
+                        if isinstance(source_item, dict):
+                            media_item = source_item.get("media_item") or {}
+                            play_uri = str(
+                                media_item.get("uri")
+                                or source_item.get("uri")
+                                or ""
+                            ).strip()
+
+                        if play_uri:
+                            logger.info(
+                                "Mirroring play from %s to companion %s via URI %s",
+                                source_player_id,
+                                companion_id,
+                                play_uri,
+                            )
+                            await ma.play_media_uri(companion_queue, play_uri)
+                        else:
+                            await ma.play(companion_queue, player_id=str(companion_id))
+
+                        ma_player_id = str(companion_id)
+                        queue_id = companion_queue
+                    else:
+                        await ma.play(queue_id, player_id=ma_player_id)
+                else:
+                    await ma.play(queue_id, player_id=ma_player_id)
             elif request.command == "pause":
                 await ma.pause(queue_id, player_id=ma_player_id)
             elif request.command == "next":
