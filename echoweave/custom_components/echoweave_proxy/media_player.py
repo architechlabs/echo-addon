@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -31,6 +32,19 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: EchoweaveProxyCoordinator = hass.data[DOMAIN][entry.entry_id]
+    keep_unique_id = f"echoweave_{entry.entry_id}_proxy"
+
+    entity_registry = er.async_get(hass)
+    existing = er.async_entries_for_config_entry(entity_registry, entry.entry_id)
+    for registry_entry in existing:
+        if registry_entry.domain != "media_player":
+            continue
+        if registry_entry.platform != DOMAIN:
+            continue
+        if registry_entry.unique_id == keep_unique_id:
+            continue
+        entity_registry.async_remove(registry_entry.entity_id)
+
     async_add_entities([EchoweaveProxyPlayerEntity(coordinator, entry)])
 
 
