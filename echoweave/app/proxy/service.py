@@ -140,39 +140,48 @@ class LocalProxyService:
         has_volume_support = "volume_set" in supported_features
 
         # For players without volume_set (e.g. UPnP Echo Dots where Amazon blocks volume),
-        # borrow volume and mute state from the companion Alexa player representing the same
-        # physical device. This makes the proxy entity show correct volume in HA.
+        # borrow volume, mute, and availability from the companion Alexa player representing
+        # the same physical device.
+        _companion_player: dict[str, Any] | None = None
         if not has_volume_support and all_players is not None:
             companion_id = self._find_volume_companion(all_players, player_id)
             if companion_id:
-                companion = next(
+                _companion_player = next(
                     (p for p in all_players if str(p.get("player_id") or "") == companion_id), None
                 )
-                if companion:
-                    logger.debug(
-                        "Borrowing volume/state from companion %s for %s", companion_id, player_id
-                    )
-                    # Pull volume from companion
-                    raw_vol = None
-                    for _vol_key in ("volume_level", "volume", "current_volume"):
-                        _v = companion.get(_vol_key)
-                        if _v is not None:
-                            raw_vol = _v
-                            break
-                    if isinstance(raw_vol, (int, float)):
-                        volume_level = float(raw_vol) / 100.0 if raw_vol > 1.0 else float(raw_vol)
-                    # Pull mute from companion
-                    _cmuted = companion.get("volume_muted") or companion.get("muted")
-                    if _cmuted is not None:
-                        is_volume_muted = bool(_cmuted)
-                    # Mark as having volume support so HA shows the slider
-                    has_volume_support = True
+
+        if _companion_player is not None:
+            logger.debug(
+                "Borrowing volume/available from companion %s for %s",
+                _companion_player.get("player_id"), player_id,
+            )
+            # Pull volume from companion
+            raw_vol = None
+            for _vol_key in ("volume_level", "volume", "current_volume"):
+                _v = _companion_player.get(_vol_key)
+                if _v is not None:
+                    raw_vol = _v
+                    break
+            if isinstance(raw_vol, (int, float)):
+                volume_level = float(raw_vol) / 100.0 if raw_vol > 1.0 else float(raw_vol)
+            # Pull mute from companion
+            _cmuted = _companion_player.get("volume_muted") or _companion_player.get("muted")
+            if _cmuted is not None:
+                is_volume_muted = bool(_cmuted)
+            # Mark as having volume support so HA shows the slider
+            has_volume_support = True
+
+        # Availability: UPnP Echo Dots go available=False when idle (MA loses UPnP connection
+        # between tracks). Use companion's available so the entity stays visible in HA.
+        _available = bool(player.get("available", False))
+        if not _available and _companion_player is not None:
+            _available = bool(_companion_player.get("available", False))
 
         return ProxyPlayerSnapshot(
             addon_player_id=self.addon_player_id(player_id),
             ma_player_id=player_id,
             name=str(player.get("name") or player_id),
-            available=bool(player.get("available", False)),
+            available=_available,
             state=str(player.get("state") or player.get("playback_state") or "unknown"),
             powered=player.get("powered"),
             volume_level=volume_level,
