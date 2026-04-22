@@ -13,7 +13,12 @@ from typing import Any
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from app.ma.client import MusicAssistantAuthError, MusicAssistantClient, MusicAssistantUnreachableError
+from app.ma.client import (
+    MusicAssistantAuthError,
+    MusicAssistantClient,
+    MusicAssistantError,
+    MusicAssistantUnreachableError,
+)
 from app.proxy.models import ProxyCommandRequest, ProxyPlayerSnapshot, ProxySnapshot
 from app.settings import Settings
 
@@ -353,6 +358,14 @@ class LocalProxyService:
             logger.info("Volume override configured: routing volume to '%s'", override)
             return override
 
+        target_is_uuid = "uuid" in target_player_id.lower()
+
+        def _log_detect(message: str, *args: Any) -> None:
+            if target_is_uuid:
+                logger.info(message, *args)
+            else:
+                logger.debug(message, *args)
+
         target = next((p for p in all_players if str(p.get("player_id") or "") == target_player_id), None)
         target_is_upuuid = target_player_id.lower().startswith("upuuid")
         if not target:
@@ -380,7 +393,7 @@ class LocalProxyService:
                     candidates = echoish
             if len(candidates) == 1:
                 pid = str(candidates[0].get("player_id") or "")
-                logger.info(
+                _log_detect(
                     "Primary player %s not present; using single volume-capable candidate %s",
                     target_player_id,
                     pid,
@@ -391,7 +404,7 @@ class LocalProxyService:
             ]
             if len(echo_candidates) == 1:
                 pid = str(echo_candidates[0].get("player_id") or "")
-                logger.info(
+                _log_detect(
                     "Primary player %s not present; using single Echo-like candidate %s",
                     target_player_id,
                     pid,
@@ -432,7 +445,7 @@ class LocalProxyService:
             for player in candidates:
                 if self._player_mac(player) == target_mac:
                     pid = str(player.get("player_id") or "")
-                    logger.info(
+                    _log_detect(
                         "Volume companion auto-detected via MAC: %s → %s (MAC %s)",
                         target_player_id, pid, target_mac,
                     )
@@ -447,7 +460,7 @@ class LocalProxyService:
                 overlap = target_ids.intersection(self._player_identifiers(player))
                 if overlap:
                     pid = str(player.get("player_id") or "")
-                    logger.info(
+                    _log_detect(
                         "Volume companion auto-detected via identifiers: %s → %s (shared=%s)",
                         target_player_id,
                         pid,
@@ -464,7 +477,7 @@ class LocalProxyService:
             # Check if either name is a substring of the other (covers "Echo Dot" in both)
             if target_name and cname and (target_name in cname or cname in target_name):
                 pid = str(player.get("player_id") or "")
-                logger.info(
+                _log_detect(
                     "Volume companion auto-detected via name match: %s ('%s') → %s ('%s')",
                     target_player_id, target_name, pid, cname,
                 )
@@ -484,7 +497,7 @@ class LocalProxyService:
         ]
         if playing_alexa:
             pid = str(playing_alexa[0].get("player_id") or "")
-            logger.info(
+            _log_detect(
                 "Volume companion auto-detected via playing Alexa heuristic: %s → %s",
                 target_player_id,
                 pid,
@@ -492,7 +505,7 @@ class LocalProxyService:
             return pid
         if len(alexa_candidates) == 1:
             pid = str(alexa_candidates[0].get("player_id") or "")
-            logger.info(
+            _log_detect(
                 "Volume companion auto-detected via single Alexa heuristic: %s → %s",
                 target_player_id,
                 pid,
@@ -502,7 +515,7 @@ class LocalProxyService:
         # 4. Last resort: if there is exactly one candidate with volume support, use it
         if len(candidates) == 1:
             pid = str(candidates[0].get("player_id") or "")
-            logger.info(
+            _log_detect(
                 "Volume companion auto-detected (single candidate): %s → %s", target_player_id, pid
             )
             return pid
@@ -552,68 +565,79 @@ class LocalProxyService:
                             or companion_id
                             or ""
                         )
-                        source_player = next(
-                            (p for p in all_players if str(p.get("player_id") or "") == source_player_id),
-                            None,
-                        )
-                        if source_player is None:
-                            source_key = "".join(ch for ch in source_player_id.lower() if ch.isalnum())
-                            for _prefix in ("upuuid", "uuid"):
-                                if source_key.startswith(_prefix):
-                                    source_key = source_key[len(_prefix):]
-                                    break
-                            if source_key:
-                                source_player = next(
-                                    (
-                                        p
-                                        for p in all_players
-                                        if source_key
-                                        in "".join(
-                                            ch for ch in str(p.get("player_id") or "").lower() if ch.isalnum()
-                                        )
-                                    ),
-                                    None,
-                                )
-                        if source_player is not None:
-                            source_queue = str(
-                                source_player.get("active_queue")
-                                or source_player.get("queue_id")
-                                or source_player.get("player_id")
-                                or source_player_id
-                                or ""
-                            )
-                        else:
-                            source_queue = str(source_player_id or queue_id or "")
-
-                        play_uri = ""
-                        source_state = await ma.get_queue_state(source_queue)
-                        source_item = source_state.get("current_item") if isinstance(source_state, dict) else None
-                        if not isinstance(source_item, dict):
-                            source_items = await ma.get_queue_items(source_queue)
-                            idx = source_state.get("current_index") if isinstance(source_state, dict) else None
-                            if isinstance(idx, int) and 0 <= idx < len(source_items):
-                                source_item = source_items[idx]
-                            elif source_items:
-                                source_item = source_items[0]
-                        if isinstance(source_item, dict):
-                            media_item = source_item.get("media_item") or {}
-                            play_uri = str(
-                                media_item.get("uri")
-                                or source_item.get("uri")
-                                or ""
-                            ).strip()
-
-                        if play_uri:
-                            logger.info(
-                                "Mirroring play from %s to companion %s via URI %s",
-                                source_player_id,
-                                companion_id,
-                                play_uri,
-                            )
-                            await ma.play_media_uri(companion_queue, play_uri)
-                            # MA may enqueue without auto-start on some providers; send explicit play.
+                        companion_state = await ma.get_queue_state(companion_queue)
+                        companion_items = companion_state.get("items") if isinstance(companion_state, dict) else 0
+                        if isinstance(companion_items, int) and companion_items > 0:
+                            # Prefer direct play when companion already has a queue; this avoids
+                            # provider-specific play_media failures while still making the speaker play.
                             await ma.play(companion_queue, player_id=str(companion_id))
                         else:
+                            source_player = next(
+                                (p for p in all_players if str(p.get("player_id") or "") == source_player_id),
+                                None,
+                            )
+                            if source_player is None:
+                                source_key = "".join(ch for ch in source_player_id.lower() if ch.isalnum())
+                                for _prefix in ("upuuid", "uuid"):
+                                    if source_key.startswith(_prefix):
+                                        source_key = source_key[len(_prefix):]
+                                        break
+                                if source_key:
+                                    source_player = next(
+                                        (
+                                            p
+                                            for p in all_players
+                                            if source_key
+                                            in "".join(
+                                                ch for ch in str(p.get("player_id") or "").lower() if ch.isalnum()
+                                            )
+                                        ),
+                                        None,
+                                    )
+                            if source_player is not None:
+                                source_queue = str(
+                                    source_player.get("active_queue")
+                                    or source_player.get("queue_id")
+                                    or source_player.get("player_id")
+                                    or source_player_id
+                                    or ""
+                                )
+                            else:
+                                source_queue = str(source_player_id or queue_id or "")
+
+                            play_uri = ""
+                            source_state = await ma.get_queue_state(source_queue)
+                            source_item = source_state.get("current_item") if isinstance(source_state, dict) else None
+                            if not isinstance(source_item, dict):
+                                source_items = await ma.get_queue_items(source_queue)
+                                idx = source_state.get("current_index") if isinstance(source_state, dict) else None
+                                if isinstance(idx, int) and 0 <= idx < len(source_items):
+                                    source_item = source_items[idx]
+                                elif source_items:
+                                    source_item = source_items[0]
+                            if isinstance(source_item, dict):
+                                media_item = source_item.get("media_item") or {}
+                                play_uri = str(
+                                    media_item.get("uri")
+                                    or source_item.get("uri")
+                                    or ""
+                                ).strip()
+
+                            if play_uri:
+                                logger.info(
+                                    "Mirroring play from %s to companion %s via URI %s",
+                                    source_player_id,
+                                    companion_id,
+                                    play_uri,
+                                )
+                                try:
+                                    await ma.play_media_uri(companion_queue, play_uri)
+                                except MusicAssistantError as exc:
+                                    logger.warning(
+                                        "Mirror play_media failed for %s (%s), falling back to direct play",
+                                        companion_queue,
+                                        exc,
+                                    )
                             await ma.play(companion_queue, player_id=str(companion_id))
 
                         post_state = await ma.get_queue_state(companion_queue)
