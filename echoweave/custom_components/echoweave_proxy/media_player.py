@@ -81,9 +81,10 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
-        # Proxy entities always expose volume controls for a stable HA UX.
-        # The proxy service handles unsupported commands gracefully per player.
-        return self._BASE_FEATURES | self._VOLUME_FEATURES
+        supports_volume = bool(self._player.get("has_volume_support"))
+        if supports_volume:
+            return self._BASE_FEATURES | self._VOLUME_FEATURES
+        return self._BASE_FEATURES
 
     def __init__(
         self,
@@ -97,6 +98,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         self._attr_unique_id = f"echoweave_{addon_player_id.replace(':', '_')}"
         # Optimistic state overrides — cleared on next coordinator refresh
         self._optimistic_volume: float | None = None
+        self._optimistic_volume_expires: float | None = None
         self._optimistic_state: str | None = None
         self._optimistic_state_expires: float | None = None
         # Sticky payload cache so the entity remains controllable even if MA temporarily
@@ -106,7 +108,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
             "name": addon_player_id,
             "available": True,
             "state": "idle",
-            "has_volume_support": True,
+            "has_volume_support": False,
         }
 
     def _live_player(self) -> dict[str, Any]:
@@ -131,11 +133,14 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         For players that permanently report volume_level=None (e.g. UPnP Echo Dots),
         the slider stays at the last user-set value rather than snapping back to 0.
         """
+        now = time.monotonic()
         real_vol = self._player.get("volume_level")
-        if real_vol is not None and self._optimistic_volume is not None:
-            self._optimistic_volume = None
+        if self._optimistic_volume is not None:
+            expiry = self._optimistic_volume_expires or 0.0
+            if real_vol is not None or (expiry and now >= expiry):
+                self._optimistic_volume = None
+                self._optimistic_volume_expires = None
         if self._optimistic_state is not None:
-            now = time.monotonic()
             real_state = str(self._player.get("state") or "").lower()
             expiry = self._optimistic_state_expires or 0.0
             if real_state in {"playing", "paused", "idle", "off", "standby", "buffering"} and real_state == self._optimistic_state:
@@ -340,8 +345,10 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     async def async_set_volume_level(self, volume: float) -> None:
         clamped = max(0.0, min(1.0, volume))
-        # Optimistically update slider so HA UI doesn't reset while command is in-flight
+        # Optimistically update slider briefly while command is in-flight.
+        # Clear quickly if MA does not provide a confirmed volume level.
         self._optimistic_volume = clamped
+        self._optimistic_volume_expires = time.monotonic() + 4.0
         self.async_write_ha_state()
         await self._send("volume_set", volume=round(clamped * 100))
 

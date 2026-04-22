@@ -368,7 +368,9 @@ class MusicAssistantClient:
         Returns a dict with queue_id, queue_item_id, name, artist, uri
         on success, or None if nothing was found or could be played.
         """
-        normalized = re.sub(r"\s+", " ", query.strip().lower())
+        normalized = query.strip().lower()
+        normalized = re.sub(r"[/\\|]+", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized)
         normalized = re.sub(r"^(songs?|music)\s+by\s+", "", normalized).strip()
         if not normalized:
             return None
@@ -497,22 +499,37 @@ class MusicAssistantClient:
 
     async def _search(self, query: str, media_type: str, limit: int = 5) -> list[dict[str, Any]]:
         """Search MA for media. Tries multiple payload shapes for version compatibility."""
-        singular = {"tracks": "track", "artists": "artist", "albums": "album", "playlists": "playlist"}.get(
-            media_type, media_type
-        )
+        singular_map = {
+            "tracks": "track",
+            "artists": "artist",
+            "albums": "album",
+            "playlists": "playlist",
+        }
+        plural_map = {
+            "track": "tracks",
+            "artist": "artists",
+            "album": "albums",
+            "playlist": "playlists",
+        }
+        singular = singular_map.get(media_type, media_type)
+        plural = plural_map.get(singular, media_type)
 
         candidates: list[dict[str, Any]] = [
             {"search_query": query, "media_types": [singular], "limit": limit},
-            {"search_query": query, "media_types": [media_type], "limit": limit},
+            {"search_query": query, "media_types": [plural], "limit": limit},
             {"search": query, "media_types": [singular], "limit": limit},
             {"query": query, "media_types": [singular], "limit": limit},
         ]
 
+        seen_payloads: set[str] = set()
+
         for payload in candidates:
+            payload_key = json.dumps(payload, sort_keys=True)
+            if payload_key in seen_payloads:
+                continue
+            seen_payloads.add(payload_key)
             try:
-                result = await self._command_fallback(
-                    ["music/search", "music.search"], **payload
-                )
+                result = await self._command("music/search", **payload)
                 items = self._extract_list(result, media_type)
                 if items:
                     return items
@@ -528,17 +545,38 @@ class MusicAssistantClient:
             return [i for i in data if isinstance(i, dict)]
         if not isinstance(data, dict):
             return []
-        singular = {"tracks": "track", "artists": "artist", "albums": "album", "playlists": "playlist"}.get(key, key)
-        for k in (key, singular, "items", "result", "results"):
+
+        singular_map = {
+            "tracks": "track",
+            "artists": "artist",
+            "albums": "album",
+            "playlists": "playlist",
+        }
+        plural_map = {
+            "track": "tracks",
+            "artist": "artists",
+            "album": "albums",
+            "playlist": "playlists",
+        }
+
+        singular = singular_map.get(key, key)
+        plural = plural_map.get(singular, key)
+
+        for k in (key, singular, plural, "items", "result", "results"):
             v = data.get(k)
             if isinstance(v, list):
                 return [i for i in v if isinstance(i, dict)]
         nested = data.get("result")
         if isinstance(nested, dict):
-            for k in (key, singular):
+            for k in (key, singular, plural):
                 v = nested.get(k)
                 if isinstance(v, list):
                     return [i for i in v if isinstance(i, dict)]
+
+        for value in data.values():
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                return [i for i in value if isinstance(i, dict)]
+
         return []
 
     # ── Playback controls ─────────────────────────────────────────────────────
