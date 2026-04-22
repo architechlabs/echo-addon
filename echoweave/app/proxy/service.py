@@ -262,35 +262,72 @@ class LocalProxyService:
         all_players: list[dict[str, Any]],
         target_player_id: str,
     ) -> str | None:
-        """Find a companion MA player that shares the same physical device (by MAC address)
-        and supports volume_set. Used to route volume commands from UPnP players (which
-        Amazon blocks volume on) to the Alexa representation of the same device."""
-        # Config override takes priority
+        """Find a companion MA player that shares the same physical device and supports volume_set.
+        Detection order:
+          1. proxy_volume_player config override (explicit player_id or name)
+          2. Shared MAC address (device_info.mac_address)
+          3. Name-based heuristic: an Alexa player whose name is a case-insensitive match
+             or substring of the UPnP player name (e.g. both contain 'Echo Dot')
+        """
+        # 1. Config override takes priority
         override = self._settings.proxy_volume_player.strip()
         if override:
             logger.info("Volume override configured: routing volume to '%s'", override)
             return override
 
-        # Auto-detect via shared MAC address
         target = next((p for p in all_players if str(p.get("player_id") or "") == target_player_id), None)
         if not target:
             return None
+
+        # Candidates: other players that support volume_set
+        candidates = [
+            p for p in all_players
+            if str(p.get("player_id") or "") != target_player_id
+            and "volume_set" in (p.get("supported_features") or [])
+        ]
+
+        # 2. MAC address match
         target_mac = self._player_mac(target)
-        if not target_mac:
-            logger.debug("Cannot auto-detect volume companion for %s: no MAC address", target_player_id)
-            return None
-        for player in all_players:
-            pid = str(player.get("player_id") or "")
-            if pid == target_player_id:
-                continue
-            if "volume_set" not in (player.get("supported_features") or []):
-                continue
-            if self._player_mac(player) == target_mac:
+        if target_mac:
+            for player in candidates:
+                if self._player_mac(player) == target_mac:
+                    pid = str(player.get("player_id") or "")
+                    logger.info(
+                        "Volume companion auto-detected via MAC: %s → %s (MAC %s)",
+                        target_player_id, pid, target_mac,
+                    )
+                    return pid
+        else:
+            logger.debug("Player %s has no MAC address; trying name-based companion detection", target_player_id)
+
+        # 3. Name-based heuristic — useful when MA's UPnP integration doesn't expose MAC
+        # Strip common prefixes and compare normalised names
+        target_name = str(target.get("name") or "").lower().strip()
+        # Remove UPnP-specific prefix tokens so "Echo Dot" matches "Nitish's Echo Dot"
+        for player in candidates:
+            cname = str(player.get("name") or "").lower().strip()
+            # Check if either name is a substring of the other (covers "Echo Dot" in both)
+            if target_name and cname and (target_name in cname or cname in target_name):
+                pid = str(player.get("player_id") or "")
                 logger.info(
-                    "Volume companion auto-detected: %s → %s (shared MAC %s)",
-                    target_player_id, pid, target_mac,
+                    "Volume companion auto-detected via name match: %s ('%s') → %s ('%s')",
+                    target_player_id, target_name, pid, cname,
                 )
                 return pid
+
+        # 4. Last resort: if there is exactly one candidate with volume support, use it
+        if len(candidates) == 1:
+            pid = str(candidates[0].get("player_id") or "")
+            logger.info(
+                "Volume companion auto-detected (single candidate): %s → %s", target_player_id, pid
+            )
+            return pid
+
+        logger.warning(
+            "No volume companion found for %s (MAC=%s, %d candidates). "
+            "Set 'proxy_volume_player' in addon options to specify explicitly.",
+            target_player_id, target_mac, len(candidates),
+        )
         return None
 
     async def execute(self, request: ProxyCommandRequest) -> dict[str, Any]:

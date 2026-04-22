@@ -66,6 +66,18 @@ async def proxy_player(addon_player_id: str, request: Request) -> dict[str, Any]
     return player.model_dump()
 
 
+@router.get("/debug/ma-players")
+async def debug_ma_players(request: Request) -> dict[str, Any]:
+    """Dump raw MA player data for debugging. Shows all fields including device_info, supported_features."""
+    proxy = _proxy_service(request)
+    ma = proxy._new_client()
+    try:
+        players = await ma.get_players()
+    finally:
+        await ma.close()
+    return {"players": players}
+
+
 @router.post("/command")
 async def proxy_command(payload: ProxyCommandRequest, request: Request) -> dict[str, Any]:
     proxy = _proxy_service(request)
