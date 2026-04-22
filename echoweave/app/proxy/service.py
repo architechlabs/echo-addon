@@ -566,6 +566,24 @@ class LocalProxyService:
                             (p for p in all_players if str(p.get("player_id") or "") == source_player_id),
                             None,
                         )
+                        if source_player is None:
+                            source_key = "".join(ch for ch in source_player_id.lower() if ch.isalnum())
+                            for _prefix in ("upuuid", "uuid"):
+                                if source_key.startswith(_prefix):
+                                    source_key = source_key[len(_prefix):]
+                                    break
+                            if source_key:
+                                source_player = next(
+                                    (
+                                        p
+                                        for p in all_players
+                                        if source_key
+                                        in "".join(
+                                            ch for ch in str(p.get("player_id") or "").lower() if ch.isalnum()
+                                        )
+                                    ),
+                                    None,
+                                )
                         source_queue = str(
                             (source_player or {}).get("active_queue")
                             or (source_player or {}).get("queue_id")
