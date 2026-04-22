@@ -539,10 +539,17 @@ class LocalProxyService:
                 source_player_id = ma_player_id
                 if request.addon_player_id:
                     source_player_id = self.resolve_player_id(request.addon_player_id)
+                source_norm = source_player_id.lower().replace(":", "").replace("-", "")
+                is_uuid_like = source_norm.startswith("upuuid") or source_norm.startswith("uuid")
 
-                if source_player_id.lower().startswith("upuuid"):
+                if is_uuid_like:
                     all_players = await ma.get_players()
-                    companion_id = self._find_volume_companion(all_players, source_player_id)
+                    companion_source_id = source_player_id
+                    if not any(
+                        str(p.get("player_id") or "") == companion_source_id for p in all_players
+                    ):
+                        companion_source_id = ma_player_id
+                    companion_id = self._find_volume_companion(all_players, companion_source_id)
                     companion_player = next(
                         (p for p in all_players if str(p.get("player_id") or "") == companion_id),
                         None,
