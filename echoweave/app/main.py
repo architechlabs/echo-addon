@@ -15,6 +15,7 @@ This supports an unlimited number of users, each with their own MA instance.
 from __future__ import annotations
 
 import logging
+import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, Request
@@ -104,12 +105,15 @@ async def _register_with_worker(settings) -> None:
     import httpx
     from app.ma.client import MusicAssistantClient
 
+    client = None
     try:
         client = MusicAssistantClient(settings.local_ma_url, settings.local_ma_token)
         raw_players = await client.get_players()
+        instance_id = (settings.backend_instance_id or "").strip() or "echoweave-local"
+        player_prefix = (settings.proxy_player_prefix or "").strip() or "addon"
         players = [
             {
-                "player_id": p.get("player_id", ""),
+                "player_id": f"addon://{instance_id}/{player_prefix}:{p.get('player_id', '')}",
                 "name": p.get("display_name") or p.get("name") or p.get("player_id", ""),
             }
             for p in raw_players
@@ -137,6 +141,10 @@ async def _register_with_worker(settings) -> None:
             )
     except Exception as exc:
         logger.warning("Worker registration failed: %s", exc)
+    finally:
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.close()
 
 
 def create_app() -> FastAPI:

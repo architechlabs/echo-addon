@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     local_ma_token: str = ""
 
     # ── Backend WebSocket bridge ───────────────────────────────────────────
-    backend_ws_url: str = ""
+    backend_ws_url: str = "wss://echo-api.gethomeassistant.com/proxy/addons/ws"
     backend_ws_token: str = ""
     backend_instance_id: str = "echoweave-local"
 
@@ -44,9 +44,8 @@ class Settings(BaseSettings):
     proxy_status_push: bool = True
     proxy_status_poll_interval: int = 3
     proxy_player_filter: str = ""
-    # When set to a MA player_id, volume commands for players without volume support
-    # are forwarded to this player (e.g. "Nitish's Echo Dot" when the primary player
-    # is a UPnP Echo Dot that doesn't support volume via UPnP).
+    # Deprecated: kept only for backward-compatible addon options parsing.
+    # The proxy no longer routes through a separate companion player.
     proxy_volume_player: str = ""
 
     # ── Worker registration ──────────────────────────────────────────────────

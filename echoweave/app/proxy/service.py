@@ -7,6 +7,7 @@ import contextlib
 import inspect
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -91,11 +92,104 @@ class LocalProxyService:
                 filtered.append(player)
         return filtered
 
+    @staticmethod
+    def _feature_names(player: dict[str, Any]) -> set[str]:
+        raw_features = player.get("supported_features") or []
+        features: set[str] = set()
+        if isinstance(raw_features, list):
+            for item in raw_features:
+                if item is None:
+                    continue
+                features.add(str(item).strip().lower())
+        return features
+
+    @staticmethod
+    def _player_volume_level(player: dict[str, Any]) -> float | None:
+        raw_volume: int | float | None = None
+        for key in ("volume_level", "volume", "current_volume"):
+            value = player.get(key)
+            if isinstance(value, (int, float)):
+                raw_volume = value
+                break
+        if raw_volume is None:
+            return None
+        if raw_volume > 1.0:
+            return max(0.0, min(1.0, float(raw_volume) / 100.0))
+        return max(0.0, min(1.0, float(raw_volume)))
+
+    @staticmethod
+    def _resolve_current_item(
+        queue_state: dict[str, Any],
+        queue_items: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        current_item = queue_state.get("current_item")
+        if isinstance(current_item, dict):
+            return current_item
+
+        current_index = queue_state.get("current_index")
+        if isinstance(current_index, int) and 0 <= current_index < len(queue_items):
+            item = queue_items[current_index]
+            if isinstance(item, dict):
+                return item
+
+        if queue_items:
+            first = queue_items[0]
+            if isinstance(first, dict):
+                return first
+
+        return None
+
+    @staticmethod
+    def _elapsed_seconds(queue_state: dict[str, Any] | None) -> float:
+        value = (queue_state or {}).get("elapsed_time")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return 0.0
+
+    async def _wait_for_playback_progress(
+        self,
+        ma: MusicAssistantClient,
+        queue_id: str,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        initial_state = await ma.get_queue_state(queue_id)
+        baseline = self._elapsed_seconds(initial_state)
+        deadline = time.monotonic() + timeout_seconds
+        state = initial_state
+
+        while True:
+            state_name = str((state or {}).get("state") or "").strip().lower()
+            elapsed = self._elapsed_seconds(state)
+            if state_name == "playing" and elapsed > baseline + 0.25:
+                return True
+            if elapsed > baseline + 0.75:
+                return True
+
+            if time.monotonic() >= deadline:
+                return False
+
+            await asyncio.sleep(0.8)
+            state = await ma.get_queue_state(queue_id)
+
+    async def _queue_playback_target(
+        self,
+        ma: MusicAssistantClient,
+        queue_id: str,
+    ) -> tuple[str, str]:
+        queue_state = await ma.get_queue_state(queue_id)
+        queue_items = await ma.get_queue_items(queue_id)
+        current_item = self._resolve_current_item(queue_state, queue_items) or {}
+
+        media_item = current_item.get("media_item") or {}
+        media_uri = str(media_item.get("uri") or current_item.get("uri") or "").strip()
+        query = str(current_item.get("name") or media_item.get("name") or "").strip()
+        return media_uri, query
+
     async def _build_player_snapshot(
         self,
         ma: MusicAssistantClient,
         player: dict[str, Any],
-        all_players: list[dict[str, Any]] | None = None,
     ) -> ProxyPlayerSnapshot:
         player_id = str(player.get("player_id") or "")
         queue_id = str(player.get("active_queue") or player_id or "")
@@ -108,56 +202,34 @@ class LocalProxyService:
                 ma.get_queue_items(queue_id),
             )
 
-        current_item = queue_state.get("current_item")
-        if not current_item and isinstance(queue_state.get("current_index"), int):
-            current_index = int(queue_state["current_index"])
-            if 0 <= current_index < len(queue_items):
-                current_item = queue_items[current_index]
+        current_item = self._resolve_current_item(queue_state, queue_items)
 
-        # MA volume field — try all known field names across MA versions
-        # MA 2.x: "volume_level" (int 0-100); some builds: "volume" or "current_volume"
-        # Use explicit None check so volume=0 is not treated as missing.
-        raw_vol = None
-        for _vol_key in ("volume_level", "volume", "current_volume"):
-            _v = player.get(_vol_key)
-            if _v is not None:
-                raw_vol = _v
-                break
-        # If MA returns it as a float 0.0-1.0, keep as-is; if int/float > 1.0 treat as 0-100
-        if isinstance(raw_vol, (int, float)):
-            volume_level = float(raw_vol) / 100.0 if raw_vol > 1.0 else float(raw_vol)
-        else:
-            volume_level = None
-        is_volume_muted = player.get("volume_muted") or player.get("muted")
+        volume_level = self._player_volume_level(player)
+        muted = player.get("volume_muted")
+        if muted is None:
+            muted = player.get("muted")
+        is_volume_muted = bool(muted) if muted is not None else None
 
-        # Determine if this player actually supports volume_set
-        supported_features = player.get("supported_features") or []
-        has_volume_support = "volume_set" in supported_features
-
-        # For players where volume is advertised but returns None (e.g. UPnP Echo Dots —
-        volume_level = float(raw_vol) / 100.0 if isinstance(raw_vol, (int, float)) and raw_vol > 1.0 else (
-            float(raw_vol) if isinstance(raw_vol, (int, float)) else None
+        features = self._feature_names(player)
+        has_volume_support = (
+            "volume_set" in features
+            or "volume_mute" in features
+            or volume_level is not None
+            or is_volume_muted is not None
         )
 
-        _hmuted = player.get("volume_muted") or player.get("muted")
-        is_volume_muted = bool(_hmuted) if _hmuted is not None else None
-        
-        has_volume_support = False
-        target_features = player.get("supported_features") or []
-        if isinstance(target_features, list) and "VOLUME_SET" in target_features:
-            has_volume_support = True
-        elif volume_level is not None:
-            has_volume_support = True
-
-        _available = bool(player.get("available", False))
-        _state = str(player.get("state") or player.get("playback_state") or "unknown")
+        available = bool(player.get("available", True))
+        state = str(player.get("state") or player.get("playback_state") or "unknown")
+        queue_state_name = str(queue_state.get("state") or "").strip().lower()
+        if queue_state_name in {"playing", "paused", "idle", "buffering"}:
+            state = queue_state_name
 
         return ProxyPlayerSnapshot(
             addon_player_id=self.addon_player_id(player_id),
             ma_player_id=player_id,
             name=str(player.get("name") or player_id),
-            available=_available,
-            state=_state,
+            available=available,
+            state=state,
             powered=player.get("powered"),
             volume_level=volume_level,
             is_volume_muted=is_volume_muted,
@@ -178,7 +250,7 @@ class LocalProxyService:
             all_players = await ma.get_players()
             players = self._filter_players(all_players)
             snapshots = await asyncio.gather(
-                *(self._build_player_snapshot(ma, player, all_players) for player in players)
+                *(self._build_player_snapshot(ma, player) for player in players)
             )
             return sorted(snapshots, key=lambda item: item.name.lower())
         except MusicAssistantAuthError:
@@ -246,9 +318,52 @@ class LocalProxyService:
         try:
             ma_player_id, queue_id = await self._resolve_player_target(ma, request.addon_player_id)
             if request.command == "play":
-                # Keep transport controls on the resolved primary queue/player.
-                # Companion routing is only used for volume/mute where UPnP Echo targets fail.
                 await ma.play(queue_id, player_id=ma_player_id)
+                started = await self._wait_for_playback_progress(
+                    ma,
+                    queue_id,
+                    timeout_seconds=8.0,
+                )
+                if not started:
+                    media_uri, query = await self._queue_playback_target(ma, queue_id)
+                    replayed = False
+
+                    if media_uri:
+                        try:
+                            await ma.play_media_uri(queue_id, media_uri, option="play")
+                            replayed = True
+                        except MusicAssistantError as replay_exc:
+                            logger.warning(
+                                "play_media fallback failed for %s: %s",
+                                queue_id,
+                                replay_exc,
+                            )
+
+                    if not replayed and query:
+                        try:
+                            replay_result = await ma.search_and_play(query, queue_id=queue_id)
+                            replayed = replay_result is not None
+                        except MusicAssistantError as replay_exc:
+                            logger.warning(
+                                "search_and_play fallback failed for %s: %s",
+                                queue_id,
+                                replay_exc,
+                            )
+
+                    if replayed:
+                        await asyncio.sleep(0.25)
+                        with contextlib.suppress(MusicAssistantError):
+                            await ma.play(queue_id, player_id=ma_player_id)
+                        started = await self._wait_for_playback_progress(
+                            ma,
+                            queue_id,
+                            timeout_seconds=8.0,
+                        )
+
+                    if not started:
+                        raise MusicAssistantError(
+                            f"Playback did not progress within 8 seconds for queue={queue_id}"
+                        )
             elif request.command == "pause":
                 await ma.pause(queue_id, player_id=ma_player_id)
             elif request.command == "next":
@@ -276,20 +391,26 @@ class LocalProxyService:
             else:
                 raise ValueError(f"Unsupported command: {request.command}")
         except (MusicAssistantUnreachableError, MusicAssistantError) as exc:
-            # MA can time out under load while still applying commands eventually.
-            # Return optimistic success so HA controls don't hard-fail on transient timeouts.
             logger.warning(
                 "MA command failed during %s for player %s: %s",
                 request.command,
                 ma_player_id or request.addon_player_id or "<unknown>",
                 exc,
             )
-            return {"ok": True, "warning": "ma_command_failed", "error": str(exc)}
+            response: dict[str, Any] = {
+                "ok": request.command != "play",
+                "warning": "ma_command_failed",
+                "error": str(exc),
+            }
+            if request.command == "play":
+                response["error_code"] = "playback_not_started"
+            with contextlib.suppress(Exception):
+                response["snapshot"] = (await self.get_snapshot()).model_dump()
+            return response
         finally:
             await ma.close()
 
-        # Added by AI: wait for MA to settle state so Home Assistant sliders don't rubber-band
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.35)
 
         try:
             player = await self.get_player(request.addon_player_id or ma_player_id)
@@ -534,8 +655,10 @@ async def websocket_status_session(
                 ProxyCommandRequest(
                     command=message.get("command"),
                     addon_player_id=message.get("addon_player_id"),
-                    query=message.get("query"),                    media_id=message.get("media_id"),
-                    media_type=message.get("media_type"),                    volume=message.get("volume"),
+                    query=message.get("query"),
+                    media_id=message.get("media_id"),
+                    media_type=message.get("media_type"),
+                    volume=message.get("volume"),
                     request_id=request_id or None,
                 )
             )
