@@ -183,7 +183,7 @@ class MusicAssistantClient:
                             f"MA RPC error for {command}: {err_val}"
                         )
                 result = data.get("result", data) if isinstance(data, dict) else data
-                logger.info("MA response: %s  status=%d  result_type=%s", command, resp.status_code, type(result).__name__)
+                logger.debug("MA response: %s  status=%d  result_type=%s", command, resp.status_code, type(result).__name__)
                 return result
             except httpx.ConnectError as exc:
                 last_exc = exc
