@@ -139,11 +139,14 @@ class LocalProxyService:
         supported_features = player.get("supported_features") or []
         has_volume_support = "volume_set" in supported_features
 
-        # For players without volume_set (e.g. UPnP Echo Dots where Amazon blocks volume),
-        # borrow volume, mute, and availability from the companion Alexa player representing
-        # the same physical device.
+        # For players where volume is advertised but returns None (e.g. UPnP Echo Dots —
+        # Amazon blocks volume at hardware level even though MA's UPnP integration lists
+        # volume_set in supported_features), also try companion routing.
+        # Condition: volume_set in features but volume_level is still None after extraction.
+        _needs_companion = (not has_volume_support) or (has_volume_support and volume_level is None)
+
         _companion_player: dict[str, Any] | None = None
-        if not has_volume_support and all_players is not None:
+        if _needs_companion and all_players is not None:
             companion_id = self._find_volume_companion(all_players, player_id)
             if companion_id:
                 _companion_player = next(
@@ -152,7 +155,7 @@ class LocalProxyService:
 
         if _companion_player is not None:
             logger.debug(
-                "Borrowing volume/available from companion %s for %s",
+                "Borrowing volume/available/state from companion %s for %s",
                 _companion_player.get("player_id"), player_id,
             )
             # Pull volume from companion
@@ -171,18 +174,26 @@ class LocalProxyService:
             # Mark as having volume support so HA shows the slider
             has_volume_support = True
 
-        # Availability: UPnP Echo Dots go available=False when idle (MA loses UPnP connection
-        # between tracks). Use companion's available so the entity stays visible in HA.
+        # Availability + state: UPnP Echo Dots go available=False / state="off" when idle
+        # (MA loses UPnP connection between tracks). Use companion values so the entity
+        # stays visible and usable in HA at all times.
         _available = bool(player.get("available", False))
-        if not _available and _companion_player is not None:
-            _available = bool(_companion_player.get("available", False))
+        _state = str(player.get("state") or player.get("playback_state") or "unknown")
+        if _companion_player is not None:
+            if not _available:
+                _available = bool(_companion_player.get("available", False))
+            # If UPnP player is off/unknown but companion is idle/playing, use companion state
+            if _state in ("off", "unknown", ""):
+                _comp_state = str(_companion_player.get("state") or _companion_player.get("playback_state") or "")
+                if _comp_state and _comp_state not in ("off", "unknown"):
+                    _state = _comp_state
 
         return ProxyPlayerSnapshot(
             addon_player_id=self.addon_player_id(player_id),
             ma_player_id=player_id,
             name=str(player.get("name") or player_id),
             available=_available,
-            state=str(player.get("state") or player.get("playback_state") or "unknown"),
+            state=_state,
             powered=player.get("powered"),
             volume_level=volume_level,
             is_volume_muted=bool(is_volume_muted) if is_volume_muted is not None else None,
