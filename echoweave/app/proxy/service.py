@@ -247,18 +247,45 @@ class LocalProxyService:
         addon_player_id: str | None,
     ) -> tuple[str, str]:
         ma_player_id = self.resolve_player_id(addon_player_id)
-        players = self._filter_players(await ma.get_players())
-        for player in players:
-            player_id = str(player.get("player_id") or "")
-            if player_id != ma_player_id:
-                continue
-            queue_id = str(
-                player.get("active_queue")
-                or player.get("queue_id")
-                or player_id
-                or ""
+        all_players = await ma.get_players()
+        players = self._filter_players(all_players)
+        for pool in (players, all_players):
+            for player in pool:
+                player_id = str(player.get("player_id") or "")
+                if player_id != ma_player_id:
+                    continue
+                queue_id = str(
+                    player.get("active_queue")
+                    or player.get("queue_id")
+                    or player_id
+                    or ""
+                )
+                return player_id, queue_id
+
+        companion_id = self._find_volume_companion(all_players, ma_player_id)
+        if companion_id:
+            companion = next(
+                (p for p in all_players if str(p.get("player_id") or "") == companion_id),
+                None,
             )
-            return player_id, queue_id
+            if companion:
+                queue_id = str(
+                    companion.get("active_queue")
+                    or companion.get("queue_id")
+                    or companion_id
+                    or ""
+                )
+                logger.warning(
+                    "Primary player %s missing in MA list; routing playback to companion %s",
+                    ma_player_id,
+                    companion_id,
+                )
+                return companion_id, queue_id
+
+        logger.warning(
+            "Primary player %s missing in MA list; falling back to raw player id",
+            ma_player_id,
+        )
         return ma_player_id, ma_player_id
 
     @staticmethod
@@ -288,6 +315,29 @@ class LocalProxyService:
 
         target = next((p for p in all_players if str(p.get("player_id") or "") == target_player_id), None)
         if not target:
+            candidates = [
+                p for p in all_players
+                if "volume_set" in (p.get("supported_features") or [])
+            ]
+            if len(candidates) == 1:
+                pid = str(candidates[0].get("player_id") or "")
+                logger.info(
+                    "Primary player %s not present; using single volume-capable candidate %s",
+                    target_player_id,
+                    pid,
+                )
+                return pid
+            echo_candidates = [
+                p for p in candidates if "echo" in str(p.get("name") or "").lower()
+            ]
+            if len(echo_candidates) == 1:
+                pid = str(echo_candidates[0].get("player_id") or "")
+                logger.info(
+                    "Primary player %s not present; using single Echo-like candidate %s",
+                    target_player_id,
+                    pid,
+                )
+                return pid
             return None
 
         # Candidates: other players that support volume_set
@@ -371,8 +421,20 @@ class LocalProxyService:
                     (p for p in all_players if str(p.get("player_id") or "") == ma_player_id), None
                 )
                 target_features = (target_player.get("supported_features") or []) if target_player else []
+                target_raw_volume = None
+                if target_player is not None:
+                    for _vol_key in ("volume_level", "volume", "current_volume"):
+                        _vv = target_player.get(_vol_key)
+                        if _vv is not None:
+                            target_raw_volume = _vv
+                            break
                 vol_player_id = ma_player_id
-                if "volume_set" not in target_features:
+                needs_companion = (
+                    target_player is None
+                    or "volume_set" not in target_features
+                    or target_raw_volume is None
+                )
+                if needs_companion:
                     companion = self._find_volume_companion(all_players, ma_player_id)
                     if companion:
                         vol_player_id = companion
@@ -387,7 +449,16 @@ class LocalProxyService:
             elif request.command == "mute":
                 if request.muted is None:
                     raise ValueError("muted (bool) is required for mute")
-                await ma.set_mute(ma_player_id, request.muted)
+                all_players = await ma.get_players()
+                target_player = next(
+                    (p for p in all_players if str(p.get("player_id") or "") == ma_player_id), None
+                )
+                mute_player_id = ma_player_id
+                if target_player is None or "volume_mute" not in (target_player.get("supported_features") or []):
+                    companion = self._find_volume_companion(all_players, ma_player_id)
+                    if companion:
+                        mute_player_id = companion
+                await ma.set_mute(mute_player_id, request.muted)
             elif request.command == "stop":
                 await ma.stop(queue_id)
             elif request.command == "play_query":

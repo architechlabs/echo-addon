@@ -97,13 +97,29 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         # Optimistic state overrides — cleared on next coordinator refresh
         self._optimistic_volume: float | None = None
         self._optimistic_state: str | None = None
+        # Sticky payload cache so the entity remains controllable even if MA temporarily
+        # drops this player from discovery (common with some Echo/UPnP integrations).
+        self._last_player_payload: dict[str, Any] = {
+            "addon_player_id": addon_player_id,
+            "name": addon_player_id,
+            "available": True,
+            "state": "idle",
+            "has_volume_support": True,
+        }
 
-    @property
-    def _player(self) -> dict[str, Any]:
+    def _live_player(self) -> dict[str, Any]:
         for player in self.coordinator.player_payloads():
             if str(player.get("addon_player_id") or "") == self._addon_player_id:
                 return player
         return {}
+
+    @property
+    def _player(self) -> dict[str, Any]:
+        live = self._live_player()
+        if live:
+            self._last_player_payload = dict(live)
+            return live
+        return self._last_player_payload
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -121,10 +137,9 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     @property
     def available(self) -> bool:
-        player = self._player
-        if not player:
-            return False
-        return bool(player.get("available", False))
+        # Mark unavailable only when coordinator polling fails (addon unreachable).
+        # Do not mirror volatile per-player availability from MA for this proxy entity.
+        return bool(self.coordinator.last_update_success)
 
     @property
     def name(self) -> str | None:
@@ -136,6 +151,9 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         if self._optimistic_state:
             return _STATE_MAP.get(self._optimistic_state, MediaPlayerState.IDLE)
         state = str(self._player.get("state") or "").lower()
+        if state in {"off", "standby", "unknown", "unavailable"} and self.available:
+            # Keep controls visible for proxy entities even when MA reports transient off/standby.
+            return MediaPlayerState.IDLE
         return _STATE_MAP.get(state, MediaPlayerState.IDLE if self.available else None)
 
     @property
