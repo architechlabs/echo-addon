@@ -80,9 +80,9 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
-        if self._player.get("has_volume_support", True):
-            return self._BASE_FEATURES | self._VOLUME_FEATURES
-        return self._BASE_FEATURES
+        # Proxy entities should always expose volume controls. Backend routing decides
+        # the effective MA target (primary player vs companion).
+        return self._BASE_FEATURES | self._VOLUME_FEATURES
 
     def __init__(
         self,
