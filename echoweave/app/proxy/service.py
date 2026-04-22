@@ -250,38 +250,6 @@ class LocalProxyService:
                 player_id = str(player.get("player_id") or "")
                 if player_id != ma_player_id:
                     continue
-                raw_volume = None
-                for _vol_key in ("volume_level", "volume", "current_volume"):
-                    _vv = player.get(_vol_key)
-                    if _vv is not None:
-                        raw_volume = _vv
-                        break
-                # UPnP Echo targets often keep queue metadata but remain unavailable/idle.
-                # Route transport controls through the Alexa companion when detected.
-                if raw_volume is None or not bool(player.get("available", False)):
-                    companion_id = self._find_volume_companion(all_players, player_id)
-                    if companion_id and companion_id != player_id:
-                        companion = next(
-                            (p for p in all_players if str(p.get("player_id") or "") == companion_id),
-                            None,
-                        )
-                        if companion is not None:
-                            c_provider = str(companion.get("provider") or "").lower()
-                            c_name = str(companion.get("name") or "").lower()
-                            c_mfr = str((companion.get("device_info") or {}).get("manufacturer") or "").lower()
-                            if "alexa" in c_provider or "echo" in c_name or "amazon" in c_mfr:
-                                comp_queue = str(
-                                    companion.get("active_queue")
-                                    or companion.get("queue_id")
-                                    or companion_id
-                                    or ""
-                                )
-                                logger.info(
-                                    "Routing playback target %s via companion %s",
-                                    player_id,
-                                    companion_id,
-                                )
-                                return companion_id, comp_queue
                 queue_id = str(
                     player.get("active_queue")
                     or player.get("queue_id")
@@ -289,26 +257,6 @@ class LocalProxyService:
                     or ""
                 )
                 return player_id, queue_id
-
-        companion_id = self._find_volume_companion(all_players, ma_player_id)
-        if companion_id:
-            companion = next(
-                (p for p in all_players if str(p.get("player_id") or "") == companion_id),
-                None,
-            )
-            if companion:
-                queue_id = str(
-                    companion.get("active_queue")
-                    or companion.get("queue_id")
-                    or companion_id
-                    or ""
-                )
-                logger.warning(
-                    "Primary player %s missing in MA list; routing playback to companion %s",
-                    ma_player_id,
-                    companion_id,
-                )
-                return companion_id, queue_id
 
         logger.warning(
             "Primary player %s missing in MA list; falling back to raw player id",
@@ -626,13 +574,15 @@ class LocalProxyService:
 
                             # Try to replay current content on the companion
                             replay_ok = False
-                            if play_attempted:
-                                # Get the current queue item from the primary queue to replay
-                                queue_state = await ma.get_queue_state(queue_id)
-                                current_item = queue_state.get("current_item") if isinstance(queue_state, dict) else None
+                            
+                            # Get the current queue item from the primary queue to replay
+                            # We can get queue state even if play wasn't attempted, because the queue exists
+                            try:
+                                queue_state_fallback = await ma.get_queue_state(queue_id)
+                                current_item = queue_state_fallback.get("current_item") if isinstance(queue_state_fallback, dict) else None
                                 if not isinstance(current_item, dict):
                                     queue_items = await ma.get_queue_items(queue_id)
-                                    idx = queue_state.get("current_index") if isinstance(queue_state, dict) else None
+                                    idx = queue_state_fallback.get("current_index") if isinstance(queue_state_fallback, dict) else None
                                     if isinstance(idx, int) and 0 <= idx < len(queue_items):
                                         current_item = queue_items[idx]
                                     elif queue_items:
@@ -662,6 +612,8 @@ class LocalProxyService:
                                         replay_ok = result is not None
                                     except MusicAssistantError as exc:
                                         logger.warning("Companion search_and_play failed: %s", exc)
+                            except Exception as exc:
+                                logger.warning("Failed to determine queue items for replay: %s", exc)
 
                             # Final fallback: just send play to companion queue directly
                             if not replay_ok:
@@ -756,6 +708,13 @@ class LocalProxyService:
             return {"ok": True, "warning": "ma_command_failed", "error": str(exc)}
         finally:
             await ma.close()
+
+        # Let MA background state settle before returning the snapshot to HA
+        if request.command in (
+            "play", "pause", "stop", "next", "previous",
+            "volume_set", "mute", "play_query", "play_media"
+        ):
+            await asyncio.sleep(0.5)
 
         try:
             player = await self.get_player(request.addon_player_id or ma_player_id)
