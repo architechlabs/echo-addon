@@ -16,6 +16,7 @@ from websockets.exceptions import ConnectionClosed
 from app.ma.client import (
     MusicAssistantAuthError,
     MusicAssistantClient,
+    MusicAssistantError,
     MusicAssistantUnreachableError,
 )
 from app.proxy.models import ProxyCommandRequest, ProxyPlayerSnapshot, ProxySnapshot
@@ -609,16 +610,16 @@ class LocalProxyService:
                 await ma.play_media_uri(queue_id, request.media_id.strip())
             else:
                 raise ValueError(f"Unsupported command: {request.command}")
-        except MusicAssistantUnreachableError as exc:
+        except (MusicAssistantUnreachableError, MusicAssistantError) as exc:
             # MA can time out under load while still applying commands eventually.
             # Return optimistic success so HA controls don't hard-fail on transient timeouts.
             logger.warning(
-                "Transient MA timeout during %s for player %s: %s",
+                "MA command failed during %s for player %s: %s",
                 request.command,
                 ma_player_id or request.addon_player_id or "<unknown>",
                 exc,
             )
-            return {"ok": True, "warning": "ma_timeout"}
+            return {"ok": True, "warning": "ma_command_failed", "error": str(exc)}
         finally:
             await ma.close()
 

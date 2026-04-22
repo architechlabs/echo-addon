@@ -558,7 +558,33 @@ class MusicAssistantClient:
                 "Queue-level play failed (%s), trying player-level: queue=%s", exc, queue_id
             )
             target_player = player_id or queue_id
-            await self._command("players/cmd/play", player_id=target_player)
+            try:
+                await self._command("players/cmd/play", player_id=target_player)
+            except MusicAssistantError as player_exc:
+                logger.warning(
+                    "Player-level play failed (%s), trying current-item play_media fallback: queue=%s",
+                    player_exc,
+                    queue_id,
+                )
+                state = await self.get_queue_state(queue_id)
+                current_item = state.get("current_item") if isinstance(state, dict) else None
+                if not isinstance(current_item, dict):
+                    items = await self.get_queue_items(queue_id)
+                    idx = state.get("current_index") if isinstance(state, dict) else None
+                    if isinstance(idx, int) and 0 <= idx < len(items):
+                        current_item = items[idx]
+                    elif items:
+                        current_item = items[0]
+
+                play_uri = ""
+                if isinstance(current_item, dict):
+                    media_item = current_item.get("media_item") or {}
+                    play_uri = str(media_item.get("uri") or current_item.get("uri") or "").strip()
+
+                if play_uri:
+                    await self.play_media_uri(queue_id, play_uri, option="play")
+                    return
+                raise
 
     async def pause(self, queue_id: str, *, player_id: str | None = None) -> None:
         """Pause the queue."""
