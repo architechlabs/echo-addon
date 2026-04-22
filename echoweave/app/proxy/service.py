@@ -7,6 +7,7 @@ import contextlib
 import inspect
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -542,6 +543,61 @@ class LocalProxyService:
                 # Keep transport controls on the resolved primary queue/player.
                 # Companion routing is only used for volume/mute where UPnP Echo targets fail.
                 await ma.play(queue_id, player_id=ma_player_id)
+
+                # Force-start routine: some MA player backends return success but stay idle.
+                # Wait up to 8 seconds; if still idle, replay current item by URI/query.
+                queue_state = await ma.get_queue_state(queue_id)
+                queue_state_name = str((queue_state or {}).get("state") or "").lower()
+                deadline = time.monotonic() + 8.0
+                while queue_state_name != "playing" and time.monotonic() < deadline:
+                    await asyncio.sleep(1.0)
+                    queue_state = await ma.get_queue_state(queue_id)
+                    queue_state_name = str((queue_state or {}).get("state") or "").lower()
+
+                if queue_state_name != "playing":
+                    logger.warning(
+                        "Queue %s still %s after play; forcing replay of current item",
+                        queue_id,
+                        queue_state_name or "<unknown>",
+                    )
+
+                    current_item = queue_state.get("current_item") if isinstance(queue_state, dict) else None
+                    if not isinstance(current_item, dict):
+                        queue_items = await ma.get_queue_items(queue_id)
+                        idx = queue_state.get("current_index") if isinstance(queue_state, dict) else None
+                        if isinstance(idx, int) and 0 <= idx < len(queue_items):
+                            current_item = queue_items[idx]
+                        elif queue_items:
+                            current_item = queue_items[0]
+
+                    force_uri = ""
+                    force_query = ""
+                    if isinstance(current_item, dict):
+                        media_item = current_item.get("media_item") or {}
+                        force_uri = str(media_item.get("uri") or current_item.get("uri") or "").strip()
+                        force_query = str(
+                            current_item.get("name")
+                            or media_item.get("name")
+                            or ""
+                        ).strip()
+
+                    replay_ok = False
+                    if force_uri:
+                        try:
+                            await ma.play_media_uri(queue_id, force_uri)
+                            replay_ok = True
+                        except MusicAssistantError as exc:
+                            logger.warning("Forced play_media replay failed for %s: %s", queue_id, exc)
+
+                    if not replay_ok and force_query:
+                        try:
+                            result = await ma.search_and_play(force_query, queue_id=queue_id)
+                            replay_ok = result is not None
+                        except MusicAssistantError as exc:
+                            logger.warning("Forced search_and_play failed for %s: %s", queue_id, exc)
+
+                    if replay_ok:
+                        await ma.play(queue_id, player_id=ma_player_id)
             elif request.command == "pause":
                 await ma.pause(queue_id, player_id=ma_player_id)
             elif request.command == "next":
