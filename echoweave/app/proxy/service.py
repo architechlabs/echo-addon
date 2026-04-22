@@ -402,13 +402,13 @@ class LocalProxyService:
         try:
             ma_player_id, queue_id = await self._resolve_player_target(ma, request.addon_player_id)
             if request.command == "play":
-                await ma.play(queue_id)
+                await ma.play(queue_id, player_id=ma_player_id)
             elif request.command == "pause":
-                await ma.pause(queue_id)
+                await ma.pause(queue_id, player_id=ma_player_id)
             elif request.command == "next":
-                await ma.next_track(queue_id)
+                await ma.next_track(queue_id, player_id=ma_player_id)
             elif request.command == "previous":
-                await ma.prev_track(queue_id)
+                await ma.prev_track(queue_id, player_id=ma_player_id)
             elif request.command == "volume_set":
                 if request.volume is None:
                     raise ValueError("volume is required for volume_set")
@@ -460,7 +460,7 @@ class LocalProxyService:
                         mute_player_id = companion
                 await ma.set_mute(mute_player_id, request.muted)
             elif request.command == "stop":
-                await ma.stop(queue_id)
+                await ma.stop(queue_id, player_id=ma_player_id)
             elif request.command == "play_query":
                 if not request.query or not request.query.strip():
                     raise ValueError("query is required for play_query")

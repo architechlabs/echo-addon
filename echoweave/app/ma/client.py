@@ -530,7 +530,7 @@ class MusicAssistantClient:
 
     # ── Playback controls ─────────────────────────────────────────────────────
 
-    async def play(self, queue_id: str) -> None:
+    async def play(self, queue_id: str, *, player_id: str | None = None) -> None:
         """Resume / start the queue.
 
         Tries queue-level play first (player_queues/play), then falls back
@@ -547,10 +547,10 @@ class MusicAssistantClient:
             logger.warning(
                 "Queue-level play failed (%s), trying player-level: queue=%s", exc, queue_id
             )
-            # player-level command uses player_id, which equals queue_id for most players
-            await self._command("players/cmd/play", player_id=queue_id)
+            target_player = player_id or queue_id
+            await self._command("players/cmd/play", player_id=target_player)
 
-    async def pause(self, queue_id: str) -> None:
+    async def pause(self, queue_id: str, *, player_id: str | None = None) -> None:
         """Pause the queue."""
         logger.info("MA pause: queue=%s", queue_id)
         try:
@@ -564,9 +564,10 @@ class MusicAssistantClient:
                 exc,
                 queue_id,
             )
-            await self._command("players/cmd/pause", player_id=queue_id)
+            target_player = player_id or queue_id
+            await self._command("players/cmd/pause", player_id=target_player)
 
-    async def stop(self, queue_id: str) -> None:
+    async def stop(self, queue_id: str, *, player_id: str | None = None) -> None:
         """Stop the queue."""
         logger.info("MA stop: queue=%s", queue_id)
         try:
@@ -580,7 +581,8 @@ class MusicAssistantClient:
                 exc,
                 queue_id,
             )
-            await self._command("players/cmd/stop", player_id=queue_id)
+            target_player = player_id or queue_id
+            await self._command("players/cmd/stop", player_id=target_player)
 
     async def play_media_uri(self, queue_id: str, media: str, option: str = "play") -> None:
         """Play a media URI on a queue (library://track/123, spotify://..., etc.)."""
@@ -598,7 +600,7 @@ class MusicAssistantClient:
         logger.info("MA pause player: player=%s", player_id)
         await self._command("players/cmd/pause", player_id=player_id)
 
-    async def next_track(self, queue_id: str) -> None:
+    async def next_track(self, queue_id: str, *, player_id: str | None = None) -> None:
         """Skip to the next track in the queue."""
         logger.info("MA next: queue=%s", queue_id)
         try:
@@ -612,12 +614,13 @@ class MusicAssistantClient:
                 exc,
                 queue_id,
             )
+            target_player = player_id or queue_id
             await self._command_fallback(
                 ["players/cmd/next", "players/cmd/next_track"],
-                player_id=queue_id,
+                player_id=target_player,
             )
 
-    async def prev_track(self, queue_id: str) -> None:
+    async def prev_track(self, queue_id: str, *, player_id: str | None = None) -> None:
         """Go back to the previous track in the queue."""
         logger.info("MA previous: queue=%s", queue_id)
         try:
@@ -631,9 +634,10 @@ class MusicAssistantClient:
                 exc,
                 queue_id,
             )
+            target_player = player_id or queue_id
             await self._command_fallback(
                 ["players/cmd/previous", "players/cmd/prev", "players/cmd/previous_track"],
-                player_id=queue_id,
+                player_id=target_player,
             )
 
     async def set_volume(self, player_id: str, volume: int) -> None:
