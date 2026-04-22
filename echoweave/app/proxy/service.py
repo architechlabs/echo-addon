@@ -16,7 +16,6 @@ from websockets.exceptions import ConnectionClosed
 from app.ma.client import (
     MusicAssistantAuthError,
     MusicAssistantClient,
-    MusicAssistantError,
     MusicAssistantUnreachableError,
 )
 from app.proxy.models import ProxyCommandRequest, ProxyPlayerSnapshot, ProxySnapshot
@@ -539,147 +538,9 @@ class LocalProxyService:
         try:
             ma_player_id, queue_id = await self._resolve_player_target(ma, request.addon_player_id)
             if request.command == "play":
-                source_player_id = ma_player_id
-                if request.addon_player_id:
-                    source_player_id = self.resolve_player_id(request.addon_player_id)
-                source_norm = source_player_id.lower().replace(":", "").replace("-", "")
-                is_uuid_like = source_norm.startswith("upuuid") or source_norm.startswith("uuid")
-
-                if is_uuid_like:
-                    all_players = await ma.get_players()
-                    companion_source_id = source_player_id
-                    if not any(
-                        str(p.get("player_id") or "") == companion_source_id for p in all_players
-                    ):
-                        companion_source_id = ma_player_id
-                    companion_id = self._find_volume_companion(all_players, companion_source_id)
-                    companion_player = next(
-                        (p for p in all_players if str(p.get("player_id") or "") == companion_id),
-                        None,
-                    ) if companion_id else None
-
-                    if companion_player is not None:
-                        companion_queue = str(
-                            companion_player.get("active_queue")
-                            or companion_player.get("queue_id")
-                            or companion_id
-                            or ""
-                        )
-                        source_player = next(
-                            (p for p in all_players if str(p.get("player_id") or "") == source_player_id),
-                            None,
-                        )
-                        if source_player is None:
-                            source_key = "".join(ch for ch in source_player_id.lower() if ch.isalnum())
-                            for _prefix in ("upuuid", "uuid"):
-                                if source_key.startswith(_prefix):
-                                    source_key = source_key[len(_prefix):]
-                                    break
-                            if source_key:
-                                source_player = next(
-                                    (
-                                        p
-                                        for p in all_players
-                                        if source_key
-                                        in "".join(
-                                            ch for ch in str(p.get("player_id") or "").lower() if ch.isalnum()
-                                        )
-                                    ),
-                                    None,
-                                )
-                        if source_player is not None:
-                            source_queue = str(
-                                source_player.get("active_queue")
-                                or source_player.get("queue_id")
-                                or source_player.get("player_id")
-                                or source_player_id
-                                or ""
-                            )
-                        else:
-                            source_queue = str(source_player_id or queue_id or "")
-
-                        source_state = await ma.get_queue_state(source_queue)
-                        source_item = source_state.get("current_item") if isinstance(source_state, dict) else None
-                        if not isinstance(source_item, dict):
-                            source_items = await ma.get_queue_items(source_queue)
-                            idx = source_state.get("current_index") if isinstance(source_state, dict) else None
-                            if isinstance(idx, int) and 0 <= idx < len(source_items):
-                                source_item = source_items[idx]
-                            elif source_items:
-                                source_item = source_items[0]
-
-                        play_uri = ""
-                        play_query = ""
-                        if isinstance(source_item, dict):
-                            media_item = source_item.get("media_item") or {}
-                            play_uri = str(
-                                media_item.get("uri")
-                                or source_item.get("uri")
-                                or ""
-                            ).strip()
-                            play_query = str(
-                                source_item.get("name")
-                                or media_item.get("name")
-                                or ""
-                            ).strip()
-
-                        companion_state = await ma.get_queue_state(companion_queue)
-                        companion_items = companion_state.get("items") if isinstance(companion_state, dict) else 0
-
-                        try:
-                            if isinstance(companion_items, int) and companion_items > 0:
-                                # Prefer direct play when companion already has a queue.
-                                await ma.play(companion_queue, player_id=str(companion_id))
-                            else:
-                                if play_uri:
-                                    logger.info(
-                                        "Mirroring play from %s to companion %s via URI %s",
-                                        source_player_id,
-                                        companion_id,
-                                        play_uri,
-                                    )
-                                    await ma.play_media_uri(companion_queue, play_uri)
-                                await ma.play(companion_queue, player_id=str(companion_id))
-                        except MusicAssistantError as exc:
-                            logger.warning(
-                                "Companion play failed for %s (%s), trying fallback chain",
-                                companion_queue,
-                                exc,
-                            )
-                            recovered = False
-                            if play_uri:
-                                try:
-                                    await ma.play_media_uri(companion_queue, play_uri)
-                                    recovered = True
-                                except MusicAssistantError:
-                                    recovered = False
-                            if not recovered and play_query:
-                                result = await ma.search_and_play(play_query, queue_id=companion_queue)
-                                recovered = result is not None
-                            if not recovered:
-                                logger.error(
-                                    "All play fallbacks failed for source=%s companion=%s",
-                                    source_player_id,
-                                    companion_id,
-                                )
-
-                        post_state = await ma.get_queue_state(companion_queue)
-                        post_queue_state = str((post_state or {}).get("state") or "").lower()
-                        if post_queue_state != "playing":
-                            logger.warning(
-                                "Companion queue %s still %s after play; retrying direct play",
-                                companion_queue,
-                                post_queue_state or "<unknown>",
-                            )
-                            await asyncio.sleep(0.5)
-                            await ma.play(companion_queue, player_id=str(companion_id))
-
-                        ma_player_id = str(companion_id)
-                        queue_id = companion_queue
-                    else:
-                        await ma.play(queue_id, player_id=ma_player_id)
-                else:
-                    await ma.play(queue_id, player_id=ma_player_id)
+                # Keep transport controls on the resolved primary queue/player.
+                # Companion routing is only used for volume/mute where UPnP Echo targets fail.
+                await ma.play(queue_id, player_id=ma_player_id)
             elif request.command == "pause":
                 await ma.pause(queue_id, player_id=ma_player_id)
             elif request.command == "next":
