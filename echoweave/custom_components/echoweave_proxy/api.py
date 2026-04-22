@@ -42,10 +42,30 @@ class EchoweaveProxyApiClient:
         except ClientError as exc:
             raise RuntimeError(f"Failed to fetch proxy players: {exc}") from exc
 
+    async def get_player(self) -> dict[str, Any]:
+        """Fetch the single primary proxy player from the addon."""
+        session = async_get_clientsession(self._hass)
+        url = f"{self._addon_url}/proxy/player"
+        try:
+            async with session.get(url, timeout=_TIMEOUT) as response:
+                response.raise_for_status()
+                data = await response.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError("Invalid primary player payload from addon")
+                _LOGGER.debug(
+                    "Fetched primary player: id=%s state=%s vol=%s",
+                    data.get("addon_player_id"),
+                    data.get("state"),
+                    data.get("volume_level"),
+                )
+                return data
+        except ClientError as exc:
+            raise RuntimeError(f"Failed to fetch primary proxy player: {exc}") from exc
+
     async def send_command(
         self,
         command: str,
-        addon_player_id: str,
+        addon_player_id: str | None,
         *,
         volume: int | None = None,
         muted: bool | None = None,
@@ -58,8 +78,9 @@ class EchoweaveProxyApiClient:
         url = f"{self._addon_url}/proxy/command"
         payload: dict[str, Any] = {
             "command": command,
-            "addon_player_id": addon_player_id,
         }
+        if addon_player_id:
+            payload["addon_player_id"] = addon_player_id
         if volume is not None:
             payload["volume"] = volume
         if muted is not None:
@@ -70,12 +91,17 @@ class EchoweaveProxyApiClient:
             payload["media_id"] = media_id
         if media_type is not None:
             payload["media_type"] = media_type
-        _LOGGER.debug("Sending command %s to %s: %s", command, addon_player_id, payload)
+        _LOGGER.debug("Sending command %s to %s: %s", command, addon_player_id or "<primary>", payload)
         try:
             async with session.post(url, json=payload, timeout=_TIMEOUT) as response:
                 response.raise_for_status()
                 result = await response.json()
-                _LOGGER.debug("Command %s → player=%s result=%s", command, addon_player_id, result.get("ok"))
+                _LOGGER.debug(
+                    "Command %s → player=%s result=%s",
+                    command,
+                    addon_player_id or "<primary>",
+                    result.get("ok"),
+                )
                 return result
         except ClientError as exc:
             _LOGGER.error("Command %s failed: %s", command, exc)

@@ -428,6 +428,38 @@ class LocalProxyService:
             players=await self.list_players(),
         )
 
+    async def get_primary_player(self) -> ProxyPlayerSnapshot:
+        players = await self.list_players()
+        if not players:
+            raise ValueError("No proxy players available")
+
+        def _score(player: ProxyPlayerSnapshot) -> int:
+            score = 0
+            player_id = player.ma_player_id.lower()
+            if "upuuid" in player_id:
+                score += 60
+            elif "uuid" in player_id:
+                score += 40
+
+            state = str(player.state or "").lower()
+            if state == "playing":
+                score += 30
+            elif state == "paused":
+                score += 20
+            elif state == "idle":
+                score += 10
+
+            if player.available:
+                score += 20
+            if player.has_volume_support:
+                score += 8
+            if player.current_item:
+                score += 12
+
+            return score
+
+        return max(players, key=_score)
+
     async def get_player(self, addon_player_id: str) -> ProxyPlayerSnapshot:
         resolved = self.resolve_player_id(addon_player_id)
         players = await self.list_players()
@@ -475,7 +507,17 @@ class LocalProxyService:
         ma = self._new_client()
         ma_player_id = ""
         try:
-            ma_player_id, queue_id = await self._resolve_player_target(ma, request.addon_player_id)
+            addon_player_id = request.addon_player_id
+            if not addon_player_id:
+                primary = await self.get_primary_player()
+                addon_player_id = primary.addon_player_id
+                logger.debug(
+                    "No addon_player_id provided for command=%s, using primary player=%s",
+                    request.command,
+                    addon_player_id,
+                )
+
+            ma_player_id, queue_id = await self._resolve_player_target(ma, addon_player_id)
             if request.command == "play":
                 media_uri, query = await self._queue_playback_target(ma, queue_id)
                 started = await self._try_start_playback_target(

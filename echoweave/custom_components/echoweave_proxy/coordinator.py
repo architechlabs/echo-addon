@@ -36,18 +36,17 @@ class EchoweaveProxyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
-            data = await self.api.get_players()
+            player = await self.api.get_player()
         except Exception as exc:
             raise UpdateFailed(f"Cannot reach Echo Bridge addon: {exc}") from exc
 
-        players = data.get("players")
-        if not isinstance(players, list):
-            raise UpdateFailed("Invalid response from addon: missing players list")
+        if not isinstance(player, dict):
+            raise UpdateFailed("Invalid response from addon: missing player payload")
 
-        return data
+        return {"player": player}
 
-    def player_payloads(self) -> list[dict[str, Any]]:
+    def player_payload(self) -> dict[str, Any]:
         if not self.data:
-            return []
-        players = self.data.get("players") or []
-        return [item for item in players if isinstance(item, dict)]
+            return {}
+        player = self.data.get("player") or {}
+        return player if isinstance(player, dict) else {}

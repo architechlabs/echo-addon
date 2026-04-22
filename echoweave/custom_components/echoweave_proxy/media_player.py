@@ -9,6 +9,7 @@ from homeassistant.components.media_player import MediaPlayerEntity, MediaType
 from homeassistant.components.media_player.const import MediaPlayerEntityFeature, MediaPlayerState
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -30,28 +31,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: EchoweaveProxyCoordinator = hass.data[DOMAIN][entry.entry_id]
-    known: set[str] = set()
-
-    def _build_entities() -> list[EchoweaveProxyPlayerEntity]:
-        new_entities: list[EchoweaveProxyPlayerEntity] = []
-        for player in coordinator.player_payloads():
-            addon_player_id = str(player.get("addon_player_id") or "")
-            if not addon_player_id or addon_player_id in known:
-                continue
-            known.add(addon_player_id)
-            new_entities.append(EchoweaveProxyPlayerEntity(coordinator, entry, addon_player_id))
-        return new_entities
-
-    entities = _build_entities()
-    if entities:
-        async_add_entities(entities)
-
-    def _handle_coordinator_update() -> None:
-        entities = _build_entities()
-        if entities:
-            async_add_entities(entities)
-
-    entry.async_on_unload(coordinator.async_add_listener(_handle_coordinator_update))
+    async_add_entities([EchoweaveProxyPlayerEntity(coordinator, entry)])
 
 
 _STATE_MAP = {
@@ -83,16 +63,10 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
     def supported_features(self) -> MediaPlayerEntityFeature:
         return self._BASE_FEATURES | self._VOLUME_FEATURES
 
-    def __init__(
-        self,
-        coordinator: EchoweaveProxyCoordinator,
-        entry: ConfigEntry,
-        addon_player_id: str,
-    ) -> None:
+    def __init__(self, coordinator: EchoweaveProxyCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         self._entry = entry
-        self._addon_player_id = addon_player_id
-        self._attr_unique_id = f"echoweave_{addon_player_id.replace(':', '_')}"
+        self._attr_unique_id = f"echoweave_{entry.entry_id}_proxy"
         # Optimistic state overrides — cleared on next coordinator refresh
         self._optimistic_volume: float | None = None
         self._optimistic_volume_expires: float | None = None
@@ -101,18 +75,16 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         # Sticky payload cache so the entity remains controllable even if MA temporarily
         # drops this player from discovery (common with some Echo/UPnP integrations).
         self._last_player_payload: dict[str, Any] = {
-            "addon_player_id": addon_player_id,
-            "name": addon_player_id,
+            "addon_player_id": None,
+            "name": "Echo Bridge Proxy",
             "available": True,
             "state": "idle",
             "has_volume_support": True,
         }
 
     def _live_player(self) -> dict[str, Any]:
-        for player in self.coordinator.player_payloads():
-            if str(player.get("addon_player_id") or "") == self._addon_player_id:
-                return player
-        return {}
+        player = self.coordinator.player_payload()
+        return player if isinstance(player, dict) else {}
 
     @property
     def _player(self) -> dict[str, Any]:
@@ -157,7 +129,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
     @property
     def name(self) -> str | None:
         player = self._player
-        return str(player.get("name") or self._addon_player_id)
+        return str(player.get("name") or "Echo Bridge Proxy")
 
     @property
     def state(self) -> MediaPlayerState | None:
@@ -290,7 +262,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
             identifiers={(DOMAIN, self._attr_unique_id)},
             manufacturer="ArchitechLabs",
             model="Echoweave Proxy Player",
-            name=str(player.get("name") or self._addon_player_id),
+            name=str(player.get("name") or "Echo Bridge Proxy"),
         )
 
     # ── Playback commands ─────────────────────────────────────────────────
@@ -305,15 +277,18 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         media_type: str | None = None,
         query: str | None = None,
     ) -> None:
-        await self.coordinator.api.send_command(
+        addon_player_id = str(self._player.get("addon_player_id") or "").strip() or None
+        result = await self.coordinator.api.send_command(
             command,
-            self._addon_player_id,
+            addon_player_id,
             volume=volume,
             muted=muted,
             media_id=media_id,
             media_type=media_type,
             query=query,
         )
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise HomeAssistantError(str(result.get("error") or f"Proxy command failed: {command}"))
         await self.coordinator.async_request_refresh()
 
     async def async_media_play(self) -> None:
@@ -361,6 +336,8 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         If media_id looks like a URI (contains ://), send as play_media.
         Otherwise, treat as a search query via play_query.
         """
+        if not media_id:
+            raise HomeAssistantError("media_id is required")
         if "://" in media_id:
             await self._send("play_media", media_id=media_id, media_type=media_type)
         else:

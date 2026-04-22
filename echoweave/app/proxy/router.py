@@ -56,6 +56,24 @@ async def proxy_players(request: Request) -> dict[str, Any]:
     return snapshot.model_dump()
 
 
+@router.get("/player")
+async def proxy_primary_player(request: Request) -> dict[str, Any]:
+    """Return the single primary proxy player selected by the addon."""
+    proxy = _proxy_service(request)
+    try:
+        player = await proxy.get_primary_player()
+    except MusicAssistantAuthError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Music Assistant authentication failed. Set local_ma_token in addon config.",
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return player.model_dump()
+
+
 @router.get("/players/{addon_player_id}")
 async def proxy_player(addon_player_id: str, request: Request) -> dict[str, Any]:
     proxy = _proxy_service(request)
