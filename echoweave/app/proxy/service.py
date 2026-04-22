@@ -474,8 +474,22 @@ class LocalProxyService:
         finally:
             await ma.close()
 
-        player = await self.get_player(request.addon_player_id or ma_player_id)
-        return {"ok": True, "player": player.model_dump()}
+        try:
+            player = await self.get_player(request.addon_player_id or ma_player_id)
+            return {"ok": True, "player": player.model_dump()}
+        except ValueError:
+            # Command execution can still succeed even if the primary UUID player is
+            # temporarily absent from MA discovery. Return success with a fresh snapshot
+            # instead of surfacing an avoidable 422 to HA.
+            logger.warning(
+                "Command %s succeeded but player %s not present in snapshot; returning snapshot fallback",
+                request.command,
+                request.addon_player_id or ma_player_id,
+            )
+            return {
+                "ok": True,
+                "snapshot": (await self.get_snapshot()).model_dump(),
+            }
 
 
 class BackendWebSocketBridge:
