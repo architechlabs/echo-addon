@@ -81,10 +81,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
-        supports_volume = bool(self._player.get("has_volume_support"))
-        if supports_volume:
-            return self._BASE_FEATURES | self._VOLUME_FEATURES
-        return self._BASE_FEATURES
+        return self._BASE_FEATURES | self._VOLUME_FEATURES
 
     def __init__(
         self,
@@ -108,7 +105,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
             "name": addon_player_id,
             "available": True,
             "state": "idle",
-            "has_volume_support": False,
+            "has_volume_support": True,
         }
 
     def _live_player(self) -> dict[str, Any]:

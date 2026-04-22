@@ -186,6 +186,165 @@ class LocalProxyService:
         query = str(current_item.get("name") or media_item.get("name") or "").strip()
         return media_uri, query
 
+    @staticmethod
+    def _player_queue_id(player: dict[str, Any]) -> str:
+        return str(
+            player.get("active_queue")
+            or player.get("queue_id")
+            or player.get("player_id")
+            or ""
+        )
+
+    @staticmethod
+    def _normalize_name(value: str) -> str:
+        cleaned_chars: list[str] = []
+        for char in value.lower():
+            if char.isalnum() or char.isspace():
+                cleaned_chars.append(char)
+            else:
+                cleaned_chars.append(" ")
+        return " ".join("".join(cleaned_chars).split())
+
+    def _shadow_player_targets(
+        self,
+        all_players: list[dict[str, Any]],
+        primary_player_id: str,
+        *,
+        prefer_volume: bool = False,
+    ) -> list[tuple[str, str]]:
+        primary = next(
+            (p for p in all_players if str(p.get("player_id") or "") == primary_player_id),
+            None,
+        )
+        if not primary:
+            return []
+
+        primary_name = self._normalize_name(str(primary.get("name") or ""))
+        primary_tokens = set(primary_name.split())
+        ranked: list[tuple[int, str, str]] = []
+
+        for player in all_players:
+            player_id = str(player.get("player_id") or "")
+            if not player_id or player_id == primary_player_id:
+                continue
+
+            queue_id = self._player_queue_id(player)
+            if not queue_id:
+                continue
+
+            score = 0
+            candidate_name = self._normalize_name(str(player.get("name") or ""))
+            candidate_tokens = set(candidate_name.split())
+
+            if primary_name and candidate_name:
+                if candidate_name == primary_name:
+                    score += 120
+                elif primary_name in candidate_name or candidate_name in primary_name:
+                    score += 90
+                else:
+                    overlap = len(primary_tokens.intersection(candidate_tokens))
+                    if overlap:
+                        score += overlap * 15
+
+            provider = str(player.get("provider") or "").lower()
+            manufacturer = str((player.get("device_info") or {}).get("manufacturer") or "").lower()
+            if "alexa" in provider or "echo" in candidate_name or "amazon" in manufacturer:
+                score += 25
+
+            state = str(player.get("state") or player.get("playback_state") or "").lower()
+            if state == "playing":
+                score += 20
+            elif state in {"paused", "idle"}:
+                score += 8
+
+            if bool(player.get("available", False)):
+                score += 8
+
+            features = self._feature_names(player)
+            if prefer_volume and ("volume_set" in features or "volume_mute" in features):
+                score += 30
+
+            if queue_id != player_id:
+                score += 5
+
+            if score > 0:
+                ranked.append((score, player_id, queue_id))
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        ordered: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for _, player_id, queue_id in ranked:
+            if player_id in seen:
+                continue
+            seen.add(player_id)
+            ordered.append((player_id, queue_id))
+
+        return ordered
+
+    async def _try_start_playback_target(
+        self,
+        ma: MusicAssistantClient,
+        *,
+        player_id: str,
+        queue_id: str,
+        media_uri: str,
+        query: str,
+        progress_timeout: float,
+    ) -> bool:
+        with contextlib.suppress(MusicAssistantError):
+            await ma.play(queue_id, player_id=player_id)
+
+        started = await self._wait_for_playback_progress(
+            ma,
+            queue_id,
+            timeout_seconds=progress_timeout,
+        )
+        if started:
+            return True
+
+        if media_uri:
+            try:
+                await ma.play_media_uri(queue_id, media_uri, option="play")
+            except MusicAssistantError as replay_exc:
+                logger.warning(
+                    "play_media fallback failed for %s: %s",
+                    queue_id,
+                    replay_exc,
+                )
+            else:
+                with contextlib.suppress(MusicAssistantError):
+                    await ma.play(queue_id, player_id=player_id)
+                started = await self._wait_for_playback_progress(
+                    ma,
+                    queue_id,
+                    timeout_seconds=progress_timeout,
+                )
+                if started:
+                    return True
+
+        if query:
+            try:
+                replay_result = await ma.search_and_play(query, queue_id=queue_id)
+            except MusicAssistantError as replay_exc:
+                logger.warning(
+                    "search_and_play fallback failed for %s: %s",
+                    queue_id,
+                    replay_exc,
+                )
+            else:
+                if replay_result is not None:
+                    with contextlib.suppress(MusicAssistantError):
+                        await ma.play(queue_id, player_id=player_id)
+                    started = await self._wait_for_playback_progress(
+                        ma,
+                        queue_id,
+                        timeout_seconds=progress_timeout,
+                    )
+                    if started:
+                        return True
+
+        return False
+
     async def _build_player_snapshot(
         self,
         ma: MusicAssistantClient,
@@ -318,52 +477,48 @@ class LocalProxyService:
         try:
             ma_player_id, queue_id = await self._resolve_player_target(ma, request.addon_player_id)
             if request.command == "play":
-                await ma.play(queue_id, player_id=ma_player_id)
-                started = await self._wait_for_playback_progress(
+                media_uri, query = await self._queue_playback_target(ma, queue_id)
+                started = await self._try_start_playback_target(
                     ma,
-                    queue_id,
-                    timeout_seconds=8.0,
+                    player_id=ma_player_id,
+                    queue_id=queue_id,
+                    media_uri=media_uri,
+                    query=query,
+                    progress_timeout=8.0,
                 )
+
                 if not started:
-                    media_uri, query = await self._queue_playback_target(ma, queue_id)
-                    replayed = False
-
-                    if media_uri:
-                        try:
-                            await ma.play_media_uri(queue_id, media_uri, option="play")
-                            replayed = True
-                        except MusicAssistantError as replay_exc:
-                            logger.warning(
-                                "play_media fallback failed for %s: %s",
-                                queue_id,
-                                replay_exc,
-                            )
-
-                    if not replayed and query:
-                        try:
-                            replay_result = await ma.search_and_play(query, queue_id=queue_id)
-                            replayed = replay_result is not None
-                        except MusicAssistantError as replay_exc:
-                            logger.warning(
-                                "search_and_play fallback failed for %s: %s",
-                                queue_id,
-                                replay_exc,
-                            )
-
-                    if replayed:
-                        await asyncio.sleep(0.25)
-                        with contextlib.suppress(MusicAssistantError):
-                            await ma.play(queue_id, player_id=ma_player_id)
-                        started = await self._wait_for_playback_progress(
+                    all_players = await ma.get_players()
+                    shadow_targets = self._shadow_player_targets(all_players, ma_player_id)
+                    for shadow_player_id, shadow_queue_id in shadow_targets[:3]:
+                        logger.info(
+                            "Trying shadow playback target player=%s queue=%s for primary=%s",
+                            shadow_player_id,
+                            shadow_queue_id,
+                            ma_player_id,
+                        )
+                        started = await self._try_start_playback_target(
                             ma,
-                            queue_id,
-                            timeout_seconds=8.0,
+                            player_id=shadow_player_id,
+                            queue_id=shadow_queue_id,
+                            media_uri=media_uri,
+                            query=query,
+                            progress_timeout=6.0,
                         )
+                        if started:
+                            logger.info(
+                                "Playback started via shadow target player=%s queue=%s",
+                                shadow_player_id,
+                                shadow_queue_id,
+                            )
+                            ma_player_id = shadow_player_id
+                            queue_id = shadow_queue_id
+                            break
 
-                    if not started:
-                        raise MusicAssistantError(
-                            f"Playback did not progress within 8 seconds for queue={queue_id}"
-                        )
+                if not started:
+                    raise MusicAssistantError(
+                        f"Playback did not progress within 8 seconds for queue={queue_id}"
+                    )
             elif request.command == "pause":
                 await ma.pause(queue_id, player_id=ma_player_id)
             elif request.command == "next":
@@ -373,21 +528,104 @@ class LocalProxyService:
             elif request.command == "volume_set":
                 if request.volume is None:
                     raise ValueError("volume is required for volume_set")
-                await ma.set_volume(ma_player_id, request.volume)
+                try:
+                    await ma.set_volume(ma_player_id, request.volume)
+                except MusicAssistantError as primary_exc:
+                    all_players = await ma.get_players()
+                    shadow_targets = self._shadow_player_targets(
+                        all_players,
+                        ma_player_id,
+                        prefer_volume=True,
+                    )
+                    for shadow_player_id, _shadow_queue_id in shadow_targets[:3]:
+                        try:
+                            logger.info(
+                                "Trying shadow volume target player=%s for primary=%s",
+                                shadow_player_id,
+                                ma_player_id,
+                            )
+                            await ma.set_volume(shadow_player_id, request.volume)
+                            ma_player_id = shadow_player_id
+                            break
+                        except MusicAssistantError:
+                            continue
+                    else:
+                        raise primary_exc
             elif request.command == "mute":
                 if request.muted is None:
                     raise ValueError("muted (bool) is required for mute")
-                await ma.set_mute(ma_player_id, request.muted)
+                try:
+                    await ma.set_mute(ma_player_id, request.muted)
+                except MusicAssistantError as primary_exc:
+                    all_players = await ma.get_players()
+                    shadow_targets = self._shadow_player_targets(
+                        all_players,
+                        ma_player_id,
+                        prefer_volume=True,
+                    )
+                    for shadow_player_id, _shadow_queue_id in shadow_targets[:3]:
+                        try:
+                            logger.info(
+                                "Trying shadow mute target player=%s for primary=%s",
+                                shadow_player_id,
+                                ma_player_id,
+                            )
+                            await ma.set_mute(shadow_player_id, request.muted)
+                            ma_player_id = shadow_player_id
+                            break
+                        except MusicAssistantError:
+                            continue
+                    else:
+                        raise primary_exc
             elif request.command == "stop":
                 await ma.stop(queue_id, player_id=ma_player_id)
             elif request.command == "play_query":
                 if not request.query or not request.query.strip():
                     raise ValueError("query is required for play_query")
-                await ma.search_and_play(request.query.strip(), queue_id=queue_id)
+                query = request.query.strip()
+                result = await ma.search_and_play(query, queue_id=queue_id)
+                if result is None:
+                    all_players = await ma.get_players()
+                    shadow_targets = self._shadow_player_targets(all_players, ma_player_id)
+                    for shadow_player_id, shadow_queue_id in shadow_targets[:3]:
+                        logger.info(
+                            "Trying shadow play_query target player=%s queue=%s",
+                            shadow_player_id,
+                            shadow_queue_id,
+                        )
+                        shadow_result = await ma.search_and_play(query, queue_id=shadow_queue_id)
+                        if shadow_result is not None:
+                            ma_player_id = shadow_player_id
+                            queue_id = shadow_queue_id
+                            break
+                    else:
+                        raise MusicAssistantError(
+                            f"Could not enqueue query on primary or shadow targets: {query}"
+                        )
             elif request.command == "play_media":
                 if not request.media_id or not request.media_id.strip():
                     raise ValueError("media_id is required for play_media")
-                await ma.play_media_uri(queue_id, request.media_id.strip())
+                media_id = request.media_id.strip()
+                try:
+                    await ma.play_media_uri(queue_id, media_id)
+                except MusicAssistantError as primary_exc:
+                    all_players = await ma.get_players()
+                    shadow_targets = self._shadow_player_targets(all_players, ma_player_id)
+                    for shadow_player_id, shadow_queue_id in shadow_targets[:3]:
+                        logger.info(
+                            "Trying shadow play_media target player=%s queue=%s",
+                            shadow_player_id,
+                            shadow_queue_id,
+                        )
+                        try:
+                            await ma.play_media_uri(shadow_queue_id, media_id)
+                            ma_player_id = shadow_player_id
+                            queue_id = shadow_queue_id
+                            break
+                        except MusicAssistantError:
+                            continue
+                    else:
+                        raise primary_exc
             else:
                 raise ValueError(f"Unsupported command: {request.command}")
         except (MusicAssistantUnreachableError, MusicAssistantError) as exc:
@@ -398,7 +636,7 @@ class LocalProxyService:
                 exc,
             )
             response: dict[str, Any] = {
-                "ok": request.command != "play",
+                "ok": request.command not in {"play", "play_query", "play_media", "volume_set", "mute"},
                 "warning": "ma_command_failed",
                 "error": str(exc),
             }
