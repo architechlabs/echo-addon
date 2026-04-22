@@ -540,63 +540,141 @@ class LocalProxyService:
         try:
             ma_player_id, queue_id = await self._resolve_player_target(ma, request.addon_player_id)
             if request.command == "play":
-                # Keep transport controls on the resolved primary queue/player.
-                # Companion routing is only used for volume/mute where UPnP Echo targets fail.
-                await ma.play(queue_id, player_id=ma_player_id)
+                # Before attempting play, check if the resolved player is actually available.
+                # UPnP Echo Dots go offline between tracks — if unavailable, the play
+                # command will silently fail while volume (routed to the Alexa companion)
+                # keeps working.
+                all_players = await ma.get_players()
+                target_player = next(
+                    (p for p in all_players if str(p.get("player_id") or "") == ma_player_id), None
+                )
+                target_available = bool((target_player or {}).get("available", False))
+                target_state = str((target_player or {}).get("state") or "").lower()
 
-                # Force-start routine: some MA player backends return success but stay idle.
-                # Wait up to 8 seconds; if still idle, replay current item by URI/query.
-                queue_state = await ma.get_queue_state(queue_id)
-                queue_state_name = str((queue_state or {}).get("state") or "").lower()
-                deadline = time.monotonic() + 8.0
-                while queue_state_name != "playing" and time.monotonic() < deadline:
-                    await asyncio.sleep(1.0)
+                # If target is available and not off, try normal play first
+                play_attempted = False
+                if target_available and target_state not in ("off", "unavailable"):
+                    try:
+                        await ma.play(queue_id, player_id=ma_player_id)
+                        play_attempted = True
+                    except Exception as exc:
+                        logger.warning(
+                            "Play failed on primary player %s: %s — will try companion",
+                            ma_player_id, exc,
+                        )
+
+                # Force-start check: verify audio actually started within 5 seconds.
+                # Alexa companion players don't always report elapsed_time, so also
+                # check if the player state transitions to "playing".
+                started = False
+                if play_attempted:
                     queue_state = await ma.get_queue_state(queue_id)
-                    queue_state_name = str((queue_state or {}).get("state") or "").lower()
 
-                if queue_state_name != "playing":
-                    logger.warning(
-                        "Queue %s still %s after play; forcing replay of current item",
-                        queue_id,
-                        queue_state_name or "<unknown>",
+                    def _elapsed(payload: dict[str, Any] | None) -> float:
+                        value = (payload or {}).get("elapsed_time")
+                        if isinstance(value, (int, float)):
+                            return float(value)
+                        return 0.0
+
+                    baseline_elapsed = _elapsed(queue_state)
+                    deadline = time.monotonic() + 5.0
+                    while time.monotonic() < deadline:
+                        queue_state_name = str((queue_state or {}).get("state") or "").lower()
+                        current_elapsed = _elapsed(queue_state)
+                        # Consider started if: state is "playing" AND either elapsed advanced
+                        # or companion player is active (Alexa players may not report elapsed)
+                        if queue_state_name == "playing" and (
+                            current_elapsed > baseline_elapsed + 0.3
+                            or current_elapsed > 0.0
+                        ):
+                            started = True
+                            break
+                        # Also check: if state changed to "playing" and at least 2s passed,
+                        # trust it — Alexa providers don't always update elapsed
+                        if queue_state_name == "playing" and (time.monotonic() - (deadline - 5.0)) > 2.0:
+                            started = True
+                            break
+                        await asyncio.sleep(0.8)
+                        queue_state = await ma.get_queue_state(queue_id)
+
+                # If play wasn't attempted (player unavailable) or didn't start, try companion
+                if not started:
+                    companion_id = self._find_volume_companion(
+                        all_players if all_players else await ma.get_players(),
+                        ma_player_id,
                     )
 
-                    current_item = queue_state.get("current_item") if isinstance(queue_state, dict) else None
-                    if not isinstance(current_item, dict):
-                        queue_items = await ma.get_queue_items(queue_id)
-                        idx = queue_state.get("current_index") if isinstance(queue_state, dict) else None
-                        if isinstance(idx, int) and 0 <= idx < len(queue_items):
-                            current_item = queue_items[idx]
-                        elif queue_items:
-                            current_item = queue_items[0]
+                    if companion_id and companion_id != ma_player_id:
+                        companion = next(
+                            (p for p in all_players if str(p.get("player_id") or "") == companion_id),
+                            None,
+                        )
+                        if companion:
+                            comp_queue = str(
+                                companion.get("active_queue")
+                                or companion.get("queue_id")
+                                or companion_id
+                                or ""
+                            )
+                            logger.info(
+                                "Primary player %s %s; routing play to companion %s (queue=%s)",
+                                ma_player_id,
+                                "unavailable" if not target_available else "not progressing",
+                                companion_id,
+                                comp_queue,
+                            )
 
-                    force_uri = ""
-                    force_query = ""
-                    if isinstance(current_item, dict):
-                        media_item = current_item.get("media_item") or {}
-                        force_uri = str(media_item.get("uri") or current_item.get("uri") or "").strip()
-                        force_query = str(
-                            current_item.get("name")
-                            or media_item.get("name")
-                            or ""
-                        ).strip()
+                            # Try to replay current content on the companion
+                            replay_ok = False
+                            if play_attempted:
+                                # Get the current queue item from the primary queue to replay
+                                queue_state = await ma.get_queue_state(queue_id)
+                                current_item = queue_state.get("current_item") if isinstance(queue_state, dict) else None
+                                if not isinstance(current_item, dict):
+                                    queue_items = await ma.get_queue_items(queue_id)
+                                    idx = queue_state.get("current_index") if isinstance(queue_state, dict) else None
+                                    if isinstance(idx, int) and 0 <= idx < len(queue_items):
+                                        current_item = queue_items[idx]
+                                    elif queue_items:
+                                        current_item = queue_items[0]
 
-                    replay_ok = False
-                    if force_uri:
-                        try:
-                            await ma.play_media_uri(queue_id, force_uri)
-                            replay_ok = True
-                        except MusicAssistantError as exc:
-                            logger.warning("Forced play_media replay failed for %s: %s", queue_id, exc)
+                                force_uri = ""
+                                force_query = ""
+                                if isinstance(current_item, dict):
+                                    media_item = current_item.get("media_item") or {}
+                                    force_uri = str(media_item.get("uri") or current_item.get("uri") or "").strip()
+                                    force_query = str(
+                                        current_item.get("name")
+                                        or media_item.get("name")
+                                        or ""
+                                    ).strip()
 
-                    if not replay_ok and force_query:
-                        try:
-                            result = await ma.search_and_play(force_query, queue_id=queue_id)
-                            replay_ok = result is not None
-                        except MusicAssistantError as exc:
-                            logger.warning("Forced search_and_play failed for %s: %s", queue_id, exc)
+                                if force_uri:
+                                    try:
+                                        await ma.play_media_uri(comp_queue, force_uri)
+                                        replay_ok = True
+                                    except MusicAssistantError as exc:
+                                        logger.warning("Companion play_media_uri failed: %s", exc)
 
-                    if replay_ok:
+                                if not replay_ok and force_query:
+                                    try:
+                                        result = await ma.search_and_play(force_query, queue_id=comp_queue)
+                                        replay_ok = result is not None
+                                    except MusicAssistantError as exc:
+                                        logger.warning("Companion search_and_play failed: %s", exc)
+
+                            # Final fallback: just send play to companion queue directly
+                            if not replay_ok:
+                                try:
+                                    await ma.play(comp_queue, player_id=companion_id)
+                                except MusicAssistantError as exc:
+                                    logger.warning("Companion play failed: %s", exc)
+                    elif not play_attempted:
+                        # No companion found either — try play on primary as last resort
+                        logger.warning(
+                            "Player %s unavailable and no companion found; attempting play anyway",
+                            ma_player_id,
+                        )
                         await ma.play(queue_id, player_id=ma_player_id)
             elif request.command == "pause":
                 await ma.pause(queue_id, player_id=ma_player_id)
