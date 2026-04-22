@@ -584,13 +584,16 @@ class LocalProxyService:
                                     ),
                                     None,
                                 )
-                        source_queue = str(
-                            (source_player or {}).get("active_queue")
-                            or (source_player or {}).get("queue_id")
-                            or queue_id
-                            or source_player_id
-                            or ""
-                        )
+                        if source_player is not None:
+                            source_queue = str(
+                                source_player.get("active_queue")
+                                or source_player.get("queue_id")
+                                or source_player.get("player_id")
+                                or source_player_id
+                                or ""
+                            )
+                        else:
+                            source_queue = str(source_player_id or queue_id or "")
 
                         play_uri = ""
                         source_state = await ma.get_queue_state(source_queue)
@@ -618,6 +621,8 @@ class LocalProxyService:
                                 play_uri,
                             )
                             await ma.play_media_uri(companion_queue, play_uri)
+                            # MA may enqueue without auto-start on some providers; send explicit play.
+                            await ma.play(companion_queue, player_id=str(companion_id))
                         else:
                             await ma.play(companion_queue, player_id=str(companion_id))
 
