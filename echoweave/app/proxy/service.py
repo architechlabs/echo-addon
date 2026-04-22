@@ -135,53 +135,22 @@ class LocalProxyService:
         has_volume_support = "volume_set" in supported_features
 
         # For players where volume is advertised but returns None (e.g. UPnP Echo Dots —
-        # Amazon blocks volume at hardware level even though MA's UPnP integration lists
-        # volume_set in supported_features), also try companion routing.
-        # Condition: volume_set in features but volume_level is still None after extraction.
-        _needs_companion = (not has_volume_support) or (has_volume_support and volume_level is None)
+        volume_level = float(raw_vol) / 100.0 if isinstance(raw_vol, (int, float)) and raw_vol > 1.0 else (
+            float(raw_vol) if isinstance(raw_vol, (int, float)) else None
+        )
 
-        _companion_player: dict[str, Any] | None = None
-        if _needs_companion and all_players is not None:
-            companion_id = self._find_volume_companion(all_players, player_id)
-            if companion_id:
-                _companion_player = next(
-                    (p for p in all_players if str(p.get("player_id") or "") == companion_id), None
-                )
-
-        if _companion_player is not None:
-            logger.debug(
-                "Borrowing volume/available/state from companion %s for %s",
-                _companion_player.get("player_id"), player_id,
-            )
-            # Pull volume from companion
-            raw_vol = None
-            for _vol_key in ("volume_level", "volume", "current_volume"):
-                _v = _companion_player.get(_vol_key)
-                if _v is not None:
-                    raw_vol = _v
-                    break
-            if isinstance(raw_vol, (int, float)):
-                volume_level = float(raw_vol) / 100.0 if raw_vol > 1.0 else float(raw_vol)
-            # Pull mute from companion
-            _cmuted = _companion_player.get("volume_muted") or _companion_player.get("muted")
-            if _cmuted is not None:
-                is_volume_muted = bool(_cmuted)
-            # Mark as having volume support so HA shows the slider
+        _hmuted = player.get("volume_muted") or player.get("muted")
+        is_volume_muted = bool(_hmuted) if _hmuted is not None else None
+        
+        has_volume_support = False
+        target_features = player.get("supported_features") or []
+        if isinstance(target_features, list) and "VOLUME_SET" in target_features:
+            has_volume_support = True
+        elif volume_level is not None:
             has_volume_support = True
 
-        # Availability + state: UPnP Echo Dots go available=False / state="off" when idle
-        # (MA loses UPnP connection between tracks). Use companion values so the entity
-        # stays visible and usable in HA at all times.
         _available = bool(player.get("available", False))
         _state = str(player.get("state") or player.get("playback_state") or "unknown")
-        if _companion_player is not None:
-            if not _available:
-                _available = bool(_companion_player.get("available", False))
-            # If UPnP player is off/unknown but companion is idle/playing, use companion state
-            if _state in ("off", "unknown", ""):
-                _comp_state = str(_companion_player.get("state") or _companion_player.get("playback_state") or "")
-                if _comp_state and _comp_state not in ("off", "unknown"):
-                    _state = _comp_state
 
         return ProxyPlayerSnapshot(
             addon_player_id=self.addon_player_id(player_id),
@@ -191,7 +160,7 @@ class LocalProxyService:
             state=_state,
             powered=player.get("powered"),
             volume_level=volume_level,
-            is_volume_muted=bool(is_volume_muted) if is_volume_muted is not None else None,
+            is_volume_muted=is_volume_muted,
             has_volume_support=has_volume_support,
             active_queue_id=queue_id or None,
             queue_state=str(queue_state.get("state") or "") or None,
@@ -249,38 +218,6 @@ class LocalProxyService:
                 player_id = str(player.get("player_id") or "")
                 if player_id != ma_player_id:
                     continue
-                raw_volume = None
-                for _vol_key in ("volume_level", "volume", "current_volume"):
-                    _vv = player.get(_vol_key)
-                    if _vv is not None:
-                        raw_volume = _vv
-                        break
-                # UPnP Echo targets often keep queue metadata but remain unavailable/idle.
-                # Route transport controls through the Alexa companion when detected.
-                if raw_volume is None or not bool(player.get("available", False)):
-                    companion_id = self._find_volume_companion(all_players, player_id)
-                    if companion_id and companion_id != player_id:
-                        companion = next(
-                            (p for p in all_players if str(p.get("player_id") or "") == companion_id),
-                            None,
-                        )
-                        if companion is not None:
-                            c_provider = str(companion.get("provider") or "").lower()
-                            c_name = str(companion.get("name") or "").lower()
-                            c_mfr = str((companion.get("device_info") or {}).get("manufacturer") or "").lower()
-                            if "alexa" in c_provider or "echo" in c_name or "amazon" in c_mfr:
-                                comp_queue = str(
-                                    companion.get("active_queue")
-                                    or companion.get("queue_id")
-                                    or companion_id
-                                    or ""
-                                )
-                                logger.info(
-                                    "Routing playback target %s via companion %s",
-                                    player_id,
-                                    companion_id,
-                                )
-                                return companion_id, comp_queue
                 queue_id = str(
                     player.get("active_queue")
                     or player.get("queue_id")
@@ -289,243 +226,13 @@ class LocalProxyService:
                 )
                 return player_id, queue_id
 
-        companion_id = self._find_volume_companion(all_players, ma_player_id)
-        if companion_id:
-            companion = next(
-                (p for p in all_players if str(p.get("player_id") or "") == companion_id),
-                None,
-            )
-            if companion:
-                queue_id = str(
-                    companion.get("active_queue")
-                    or companion.get("queue_id")
-                    or companion_id
-                    or ""
-                )
-                logger.warning(
-                    "Primary player %s missing in MA list; routing playback to companion %s",
-                    ma_player_id,
-                    companion_id,
-                )
-                return companion_id, queue_id
-
         logger.warning(
             "Primary player %s missing in MA list; falling back to raw player id",
             ma_player_id,
         )
         return ma_player_id, ma_player_id
 
-    @staticmethod
-    def _player_mac(player: dict[str, Any]) -> str | None:
-        """Extract the MAC address from a MA player dict, or None if unavailable."""
-        device_info = player.get("device_info") or {}
-        mac = device_info.get("mac_address") or (device_info.get("identifiers") or {}).get("mac_address")
-        return str(mac).lower().replace("-", ":") if mac else None
 
-    @staticmethod
-    def _player_identifiers(player: dict[str, Any]) -> set[str]:
-        """Return normalized device identifier values for companion matching."""
-        device_info = player.get("device_info") or {}
-        identifiers = device_info.get("identifiers") or {}
-        values: set[str] = set()
-        if isinstance(identifiers, dict):
-            for raw in identifiers.values():
-                if raw is None:
-                    continue
-                val = str(raw).strip().lower()
-                if val:
-                    values.add(val)
-        mac = LocalProxyService._player_mac(player)
-        if mac:
-            values.add(mac)
-        return values
-
-    def _find_volume_companion(
-        self,
-        all_players: list[dict[str, Any]],
-        target_player_id: str,
-    ) -> str | None:
-        """Find a companion MA player that shares the same physical device and supports volume_set.
-        Detection order:
-          1. proxy_volume_player config override (explicit player_id or name)
-          2. Shared MAC address (device_info.mac_address)
-          3. Name-based heuristic: an Alexa player whose name is a case-insensitive match
-             or substring of the UPnP player name (e.g. both contain 'Echo Dot')
-        """
-        # 1. Config override takes priority
-        override = self._settings.proxy_volume_player.strip()
-        if override:
-            logger.info("Volume override configured: routing volume to '%s'", override)
-            return override
-
-        target_is_uuid = "uuid" in target_player_id.lower()
-
-        def _log_detect(message: str, *args: Any) -> None:
-            if target_is_uuid:
-                logger.info(message, *args)
-            else:
-                logger.debug(message, *args)
-
-        target = next((p for p in all_players if str(p.get("player_id") or "") == target_player_id), None)
-        target_is_upuuid = target_player_id.lower().startswith("upuuid")
-        if not target:
-            candidates = [
-                p for p in all_players
-                if (
-                    "volume_set" in (p.get("supported_features") or [])
-                    or "volume_mute" in (p.get("supported_features") or [])
-                    or any(p.get(k) is not None for k in ("volume_level", "volume", "current_volume"))
-                )
-            ]
-            if not candidates:
-                candidates = list(all_players)
-            if target_is_upuuid:
-                echoish = [
-                    p
-                    for p in candidates
-                    if (
-                        "alexa" in str(p.get("provider") or "").lower()
-                        or "echo" in str(p.get("name") or "").lower()
-                        or "amazon" in str((p.get("device_info") or {}).get("manufacturer") or "").lower()
-                    )
-                ]
-                if echoish:
-                    candidates = echoish
-            if len(candidates) == 1:
-                pid = str(candidates[0].get("player_id") or "")
-                _log_detect(
-                    "Primary player %s not present; using single volume-capable candidate %s",
-                    target_player_id,
-                    pid,
-                )
-                return pid
-            echo_candidates = [
-                p for p in candidates if "echo" in str(p.get("name") or "").lower()
-            ]
-            if len(echo_candidates) == 1:
-                pid = str(echo_candidates[0].get("player_id") or "")
-                _log_detect(
-                    "Primary player %s not present; using single Echo-like candidate %s",
-                    target_player_id,
-                    pid,
-                )
-                return pid
-            return None
-
-        # Candidates: other players that are likely volume-capable
-        broad_candidates = [
-            p for p in all_players if str(p.get("player_id") or "") != target_player_id
-        ]
-        candidates = [
-            p for p in broad_candidates
-            if (
-                "volume_set" in (p.get("supported_features") or [])
-                or "volume_mute" in (p.get("supported_features") or [])
-                or any(p.get(k) is not None for k in ("volume_level", "volume", "current_volume"))
-            )
-        ]
-        if not candidates:
-            candidates = broad_candidates
-        if target_is_upuuid:
-            echoish = [
-                p
-                for p in candidates
-                if (
-                    "alexa" in str(p.get("provider") or "").lower()
-                    or "echo" in str(p.get("name") or "").lower()
-                    or "amazon" in str((p.get("device_info") or {}).get("manufacturer") or "").lower()
-                )
-            ]
-            if echoish:
-                candidates = echoish
-
-        # 2. MAC address match
-        target_mac = self._player_mac(target)
-        if target_mac:
-            for player in candidates:
-                if self._player_mac(player) == target_mac:
-                    pid = str(player.get("player_id") or "")
-                    _log_detect(
-                        "Volume companion auto-detected via MAC: %s → %s (MAC %s)",
-                        target_player_id, pid, target_mac,
-                    )
-                    return pid
-        else:
-            logger.debug("Player %s has no MAC address; trying name-based companion detection", target_player_id)
-
-        # 2b. Identifier match (uuid/ip/serial/etc.)
-        target_ids = self._player_identifiers(target)
-        if target_ids:
-            for player in candidates:
-                overlap = target_ids.intersection(self._player_identifiers(player))
-                if overlap:
-                    pid = str(player.get("player_id") or "")
-                    _log_detect(
-                        "Volume companion auto-detected via identifiers: %s → %s (shared=%s)",
-                        target_player_id,
-                        pid,
-                        sorted(overlap)[:3],
-                    )
-                    return pid
-
-        # 3. Name-based heuristic — useful when MA's UPnP integration doesn't expose MAC
-        # Strip common prefixes and compare normalised names
-        target_name = str(target.get("name") or "").lower().strip()
-        # Remove UPnP-specific prefix tokens so "Echo Dot" matches "Nitish's Echo Dot"
-        for player in candidates:
-            cname = str(player.get("name") or "").lower().strip()
-            # Check if either name is a substring of the other (covers "Echo Dot" in both)
-            if target_name and cname and (target_name in cname or cname in target_name):
-                pid = str(player.get("player_id") or "")
-                _log_detect(
-                    "Volume companion auto-detected via name match: %s ('%s') → %s ('%s')",
-                    target_player_id, target_name, pid, cname,
-                )
-                return pid
-
-        # 3b. Alexa/Echo heuristic fallback
-        alexa_candidates = [
-            p for p in candidates
-            if (
-                "alexa" in str(p.get("provider") or "").lower()
-                or "echo" in str(p.get("name") or "").lower()
-            )
-        ]
-        playing_alexa = [
-            p for p in alexa_candidates
-            if str(p.get("state") or p.get("playback_state") or "").lower() == "playing"
-        ]
-        if playing_alexa:
-            pid = str(playing_alexa[0].get("player_id") or "")
-            _log_detect(
-                "Volume companion auto-detected via playing Alexa heuristic: %s → %s",
-                target_player_id,
-                pid,
-            )
-            return pid
-        if len(alexa_candidates) == 1:
-            pid = str(alexa_candidates[0].get("player_id") or "")
-            _log_detect(
-                "Volume companion auto-detected via single Alexa heuristic: %s → %s",
-                target_player_id,
-                pid,
-            )
-            return pid
-
-        # 4. Last resort: if there is exactly one candidate with volume support, use it
-        if len(candidates) == 1:
-            pid = str(candidates[0].get("player_id") or "")
-            _log_detect(
-                "Volume companion auto-detected (single candidate): %s → %s", target_player_id, pid
-            )
-            return pid
-
-        logger.warning(
-            "No volume companion found for %s (MAC=%s, %d candidates). "
-            "Set 'proxy_volume_player' in addon options to specify explicitly.",
-            target_player_id, target_mac, len(candidates),
-        )
-        return None
 
     async def execute(self, request: ProxyCommandRequest) -> dict[str, Any]:
         if request.command == "refresh":
@@ -551,53 +258,11 @@ class LocalProxyService:
             elif request.command == "volume_set":
                 if request.volume is None:
                     raise ValueError("volume is required for volume_set")
-                # Determine which player to actually send volume to.
-                # UPnP Echo Dots and similar devices have volume_set blocked by the manufacturer.
-                # If the target doesn't support volume, find a companion (Alexa player for the
-                # same physical device) and route to it instead.
-                all_players = await ma.get_players()
-                target_player = next(
-                    (p for p in all_players if str(p.get("player_id") or "") == ma_player_id), None
-                )
-                target_features = (target_player.get("supported_features") or []) if target_player else []
-                target_raw_volume = None
-                if target_player is not None:
-                    for _vol_key in ("volume_level", "volume", "current_volume"):
-                        _vv = target_player.get(_vol_key)
-                        if _vv is not None:
-                            target_raw_volume = _vv
-                            break
-                vol_player_id = ma_player_id
-                needs_companion = (
-                    target_player is None
-                    or "volume_set" not in target_features
-                    or target_raw_volume is None
-                )
-                if needs_companion:
-                    companion = self._find_volume_companion(all_players, ma_player_id)
-                    if companion:
-                        vol_player_id = companion
-                    else:
-                        logger.warning(
-                            "Player %s has no volume_set support and no companion found; "
-                            "attempting anyway. Set 'proxy_volume_player' in addon config "
-                            "to force-route to a specific player (e.g. 'Nitish\\'s Echo Dot').",
-                            ma_player_id,
-                        )
-                await ma.set_volume(vol_player_id, request.volume)
+                await ma.set_volume(ma_player_id, request.volume)
             elif request.command == "mute":
                 if request.muted is None:
                     raise ValueError("muted (bool) is required for mute")
-                all_players = await ma.get_players()
-                target_player = next(
-                    (p for p in all_players if str(p.get("player_id") or "") == ma_player_id), None
-                )
-                mute_player_id = ma_player_id
-                if target_player is None or "volume_mute" not in (target_player.get("supported_features") or []):
-                    companion = self._find_volume_companion(all_players, ma_player_id)
-                    if companion:
-                        mute_player_id = companion
-                await ma.set_mute(mute_player_id, request.muted)
+                await ma.set_mute(ma_player_id, request.muted)
             elif request.command == "stop":
                 await ma.stop(queue_id, player_id=ma_player_id)
             elif request.command == "play_query":
