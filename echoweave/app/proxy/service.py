@@ -323,6 +323,24 @@ class LocalProxyService:
         mac = device_info.get("mac_address") or (device_info.get("identifiers") or {}).get("mac_address")
         return str(mac).lower().replace("-", ":") if mac else None
 
+    @staticmethod
+    def _player_identifiers(player: dict[str, Any]) -> set[str]:
+        """Return normalized device identifier values for companion matching."""
+        device_info = player.get("device_info") or {}
+        identifiers = device_info.get("identifiers") or {}
+        values: set[str] = set()
+        if isinstance(identifiers, dict):
+            for raw in identifiers.values():
+                if raw is None:
+                    continue
+                val = str(raw).strip().lower()
+                if val:
+                    values.add(val)
+        mac = LocalProxyService._player_mac(player)
+        if mac:
+            values.add(mac)
+        return values
+
     def _find_volume_companion(
         self,
         all_players: list[dict[str, Any]],
@@ -345,8 +363,14 @@ class LocalProxyService:
         if not target:
             candidates = [
                 p for p in all_players
-                if "volume_set" in (p.get("supported_features") or [])
+                if (
+                    "volume_set" in (p.get("supported_features") or [])
+                    or "volume_mute" in (p.get("supported_features") or [])
+                    or any(p.get(k) is not None for k in ("volume_level", "volume", "current_volume"))
+                )
             ]
+            if not candidates:
+                candidates = list(all_players)
             if len(candidates) == 1:
                 pid = str(candidates[0].get("player_id") or "")
                 logger.info(
@@ -368,12 +392,20 @@ class LocalProxyService:
                 return pid
             return None
 
-        # Candidates: other players that support volume_set
-        candidates = [
-            p for p in all_players
-            if str(p.get("player_id") or "") != target_player_id
-            and "volume_set" in (p.get("supported_features") or [])
+        # Candidates: other players that are likely volume-capable
+        broad_candidates = [
+            p for p in all_players if str(p.get("player_id") or "") != target_player_id
         ]
+        candidates = [
+            p for p in broad_candidates
+            if (
+                "volume_set" in (p.get("supported_features") or [])
+                or "volume_mute" in (p.get("supported_features") or [])
+                or any(p.get(k) is not None for k in ("volume_level", "volume", "current_volume"))
+            )
+        ]
+        if not candidates:
+            candidates = broad_candidates
 
         # 2. MAC address match
         target_mac = self._player_mac(target)
@@ -389,6 +421,21 @@ class LocalProxyService:
         else:
             logger.debug("Player %s has no MAC address; trying name-based companion detection", target_player_id)
 
+        # 2b. Identifier match (uuid/ip/serial/etc.)
+        target_ids = self._player_identifiers(target)
+        if target_ids:
+            for player in candidates:
+                overlap = target_ids.intersection(self._player_identifiers(player))
+                if overlap:
+                    pid = str(player.get("player_id") or "")
+                    logger.info(
+                        "Volume companion auto-detected via identifiers: %s → %s (shared=%s)",
+                        target_player_id,
+                        pid,
+                        sorted(overlap)[:3],
+                    )
+                    return pid
+
         # 3. Name-based heuristic — useful when MA's UPnP integration doesn't expose MAC
         # Strip common prefixes and compare normalised names
         target_name = str(target.get("name") or "").lower().strip()
@@ -403,6 +450,35 @@ class LocalProxyService:
                     target_player_id, target_name, pid, cname,
                 )
                 return pid
+
+        # 3b. Alexa/Echo heuristic fallback
+        alexa_candidates = [
+            p for p in candidates
+            if (
+                "alexa" in str(p.get("provider") or "").lower()
+                or "echo" in str(p.get("name") or "").lower()
+            )
+        ]
+        playing_alexa = [
+            p for p in alexa_candidates
+            if str(p.get("state") or p.get("playback_state") or "").lower() == "playing"
+        ]
+        if playing_alexa:
+            pid = str(playing_alexa[0].get("player_id") or "")
+            logger.info(
+                "Volume companion auto-detected via playing Alexa heuristic: %s → %s",
+                target_player_id,
+                pid,
+            )
+            return pid
+        if len(alexa_candidates) == 1:
+            pid = str(alexa_candidates[0].get("player_id") or "")
+            logger.info(
+                "Volume companion auto-detected via single Alexa heuristic: %s → %s",
+                target_player_id,
+                pid,
+            )
+            return pid
 
         # 4. Last resort: if there is exactly one candidate with volume support, use it
         if len(candidates) == 1:
