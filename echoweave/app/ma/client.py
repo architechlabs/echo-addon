@@ -552,10 +552,7 @@ class MusicAssistantClient:
         """
         logger.info("MA play: queue=%s", queue_id)
         try:
-            await self._command_fallback(
-                ["player_queues/play", "playerqueues/play"],
-                queue_id=queue_id,
-            )
+            await self._command("player_queues/play", queue_id=queue_id)
         except MusicAssistantError as exc:
             logger.warning(
                 "Queue-level play failed (%s), trying player-level: queue=%s", exc, queue_id
