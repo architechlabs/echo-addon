@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from homeassistant.components.media_player import MediaPlayerEntity, MediaType
@@ -97,6 +98,7 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         # Optimistic state overrides — cleared on next coordinator refresh
         self._optimistic_volume: float | None = None
         self._optimistic_state: str | None = None
+        self._optimistic_state_expires: float | None = None
         # Sticky payload cache so the entity remains controllable even if MA temporarily
         # drops this player from discovery (common with some Echo/UPnP integrations).
         self._last_player_payload: dict[str, Any] = {
@@ -132,7 +134,16 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
         real_vol = self._player.get("volume_level")
         if real_vol is not None and self._optimistic_volume is not None:
             self._optimistic_volume = None
-        self._optimistic_state = None
+        if self._optimistic_state is not None:
+            now = time.monotonic()
+            real_state = str(self._player.get("state") or "").lower()
+            expiry = self._optimistic_state_expires or 0.0
+            if real_state in {"playing", "paused", "idle", "off", "standby", "buffering"} and real_state == self._optimistic_state:
+                self._optimistic_state = None
+                self._optimistic_state_expires = None
+            elif expiry and now >= expiry:
+                self._optimistic_state = None
+                self._optimistic_state_expires = None
         super()._handle_coordinator_update()
 
     @property
@@ -305,16 +316,19 @@ class EchoweaveProxyPlayerEntity(CoordinatorEntity[EchoweaveProxyCoordinator], M
 
     async def async_media_play(self) -> None:
         self._optimistic_state = "playing"
+        self._optimistic_state_expires = time.monotonic() + 12.0
         self.async_write_ha_state()
         await self._send("play")
 
     async def async_media_pause(self) -> None:
         self._optimistic_state = "paused"
+        self._optimistic_state_expires = time.monotonic() + 6.0
         self.async_write_ha_state()
         await self._send("pause")
 
     async def async_media_stop(self) -> None:
         self._optimistic_state = "idle"
+        self._optimistic_state_expires = time.monotonic() + 6.0
         self.async_write_ha_state()
         await self._send("stop")
 

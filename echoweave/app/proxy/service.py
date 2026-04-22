@@ -95,15 +95,6 @@ class LocalProxyService:
         player_id = str(player.get("player_id") or "")
         queue_id = str(player.get("active_queue") or player_id or "")
 
-        # Log raw player data to diagnose field names (DEBUG only)
-        logger.debug(
-            "MA raw player: id=%s  keys=%s  volume_level=%s  state=%s",
-            player_id,
-            list(player.keys()),
-            player.get("volume_level"),
-            player.get("state"),
-        )
-
         queue_state: dict[str, Any] = {}
         queue_items: list[dict[str, Any]] = []
         if queue_id:
@@ -132,7 +123,6 @@ class LocalProxyService:
             volume_level = float(raw_vol) / 100.0 if raw_vol > 1.0 else float(raw_vol)
         else:
             volume_level = None
-        logger.debug("MA player %s volume: raw=%s  converted=%s", player_id, raw_vol, volume_level)
         is_volume_muted = player.get("volume_muted") or player.get("muted")
 
         # Determine if this player actually supports volume_set
@@ -624,6 +614,17 @@ class LocalProxyService:
                             # MA may enqueue without auto-start on some providers; send explicit play.
                             await ma.play(companion_queue, player_id=str(companion_id))
                         else:
+                            await ma.play(companion_queue, player_id=str(companion_id))
+
+                        post_state = await ma.get_queue_state(companion_queue)
+                        post_queue_state = str((post_state or {}).get("state") or "").lower()
+                        if post_queue_state != "playing":
+                            logger.warning(
+                                "Companion queue %s still %s after play; retrying direct play",
+                                companion_queue,
+                                post_queue_state or "<unknown>",
+                            )
+                            await asyncio.sleep(0.5)
                             await ma.play(companion_queue, player_id=str(companion_id))
 
                         ma_player_id = str(companion_id)

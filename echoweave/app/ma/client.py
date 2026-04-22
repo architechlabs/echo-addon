@@ -156,8 +156,21 @@ class MusicAssistantClient:
                 resp = await client.post(self._api_url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
-                # Always log the full raw body for debugging
-                logger.debug("MA raw response: %s  body=%s", command, json.dumps(data, separators=(",", ":"), default=str)[:1000])
+                # Keep debug logs compact for high-frequency polling commands.
+                if command in {"players/all", "player_queues/get", "player_queues/items"}:
+                    if isinstance(data, list):
+                        summary = f"list[{len(data)}]"
+                    elif isinstance(data, dict):
+                        summary = f"dict_keys={list(data.keys())[:8]}"
+                    else:
+                        summary = type(data).__name__
+                    logger.debug("MA raw response: %s  summary=%s", command, summary)
+                else:
+                    logger.debug(
+                        "MA raw response: %s  body=%s",
+                        command,
+                        json.dumps(data, separators=(",", ":"), default=str)[:600],
+                    )
                 # MA returns HTTP 200 even for errors — error is in the JSON body.
                 # Detect error if: "error" key present AND non-null, regardless of "result"
                 if isinstance(data, dict):
