@@ -254,6 +254,38 @@ class LocalProxyService:
                 player_id = str(player.get("player_id") or "")
                 if player_id != ma_player_id:
                     continue
+                raw_volume = None
+                for _vol_key in ("volume_level", "volume", "current_volume"):
+                    _vv = player.get(_vol_key)
+                    if _vv is not None:
+                        raw_volume = _vv
+                        break
+                # UPnP Echo targets often keep queue metadata but remain unavailable/idle.
+                # Route transport controls through the Alexa companion when detected.
+                if raw_volume is None or not bool(player.get("available", False)):
+                    companion_id = self._find_volume_companion(all_players, player_id)
+                    if companion_id and companion_id != player_id:
+                        companion = next(
+                            (p for p in all_players if str(p.get("player_id") or "") == companion_id),
+                            None,
+                        )
+                        if companion is not None:
+                            c_provider = str(companion.get("provider") or "").lower()
+                            c_name = str(companion.get("name") or "").lower()
+                            c_mfr = str((companion.get("device_info") or {}).get("manufacturer") or "").lower()
+                            if "alexa" in c_provider or "echo" in c_name or "amazon" in c_mfr:
+                                comp_queue = str(
+                                    companion.get("active_queue")
+                                    or companion.get("queue_id")
+                                    or companion_id
+                                    or ""
+                                )
+                                logger.info(
+                                    "Routing playback target %s via companion %s",
+                                    player_id,
+                                    companion_id,
+                                )
+                                return companion_id, comp_queue
                 queue_id = str(
                     player.get("active_queue")
                     or player.get("queue_id")
